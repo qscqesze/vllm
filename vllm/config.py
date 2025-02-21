@@ -919,10 +919,6 @@ class ModelConfig:
         start, end = self.get_layers_start_end_indices(parallel_config)
 
         if is_transformer:
-            # Handle minimax model
-            if hasattr(self.hf_config, "attn_type_list"):
-                # 1 represents flash attention and 0 represents linear attention
-                return sum(t == 1 for t in self.hf_config.attn_type_list)
             # Handle the basic case first
             return end - start if attn_block_type else 0
         elif self.is_attention_free:
@@ -931,17 +927,26 @@ class ModelConfig:
             # is only one type of attention-free block type.
             return 0 if attn_block_type else end - start
         else:
-            # Hybrid model
+            # Hybrid model Jamba
             layers_block_type_value = getattr(self.hf_config,
                                               "layers_block_type", None)
-            if layers_block_type_value is None:
-                raise ValueError("The model is an hybrid without a "
-                                 "layers_block_type in the hf_config, "
-                                 "cannot determine the num of "
-                                 f"{block_type.value} layers")
-
-            return sum(t == block_type.value
+            if layers_block_type_value:
+                return sum(t == block_type.value
                        for t in layers_block_type_value[start:end])
+
+            # Hybrid model Minimax
+            attn_type_list = getattr(self.hf_config, 
+                                     "attn_type_list", None)
+            if attn_type_list:
+                return sum(t == 1 for t in attn_type_list[start:end])
+
+            if layers_block_type_value is None and attn_type_list is None:
+                raise ValueError("The model is an hybrid without a"
+                                "layers_block_type or an attn_type_list in the hf_config,"
+                                "cannot determine the num of "
+                                f"{block_type.value} layers")
+
+    
 
     def get_multimodal_config(self) -> "MultiModalConfig":
         """

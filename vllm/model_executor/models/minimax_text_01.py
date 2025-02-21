@@ -1117,7 +1117,7 @@ class MiniMaxText01Model(nn.Module):
         return hidden_states
 
 
-class MiniMaxText01ForCausalLM(nn.Module, HasInnerState):     # IsHybrid后续加
+class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""
                  ) -> None:
