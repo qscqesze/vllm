@@ -61,9 +61,10 @@ class ModelOptFp8Config(QuantizationConfig):
     def from_config(cls, config: Dict[str, Any]) -> "ModelOptFp8Config":
         quant_config = cls.get_from_keys(config, ["quantization"])
         quant_method = quant_config["quant_algo"]
-        if quant_method not in QUANT_ALGOS:
-            raise ValueError(f"ModelOpt currently only supports: {QUANT_ALGOS}"
-                             " quantizations in vLLM. Please check the "
+        is_checkpoint_fp8_serialized = ("FP8" in quant_method)
+        if not is_checkpoint_fp8_serialized:
+            raise ValueError("ModelOpt currently only supports static FP8 "
+                             "quantization in vLLM. Please check the "
                              "`hf_quant_config.json` file for your model's "
                              "quant configuration.")
         is_checkpoint_fp8_serialized = ("FP8" in quant_method)
