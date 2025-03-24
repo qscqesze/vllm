@@ -44,6 +44,8 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import HasInnerState, IsHybrid
 from .minimax_cache import MinimaxCacheManager, MinimaxCacheParams
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
+from vllm.inputs.registry import MultimodalProcessorInfo
+from vllm.model_executor.models.llava import LlavaMultimodalProjector
 
 
 def replace_weight_name(name: str,
@@ -976,6 +978,21 @@ class MiniMaxVL01Model(nn.Module):
         return hidden_states
 
 
+class MinimaxVL01MultimodalProcessorInfo(MultimodalProcessorInfo):
+    """多模态处理器信息类，用于处理MiniMaxVL01模型的多模态输入"""
+    
+    def __init__(self, ctx):
+        super().__init__(ctx)
+    
+    def get_mm_max_tokens_per_item(self, model_config=None):
+        # 返回一个空字典，表示不支持多模态输入
+        return {}
+    
+    def get_hf_config(self):
+        # 返回原始配置，避免类型检查错误
+        return self.ctx.model_config.hf_config
+
+
 class MiniMaxVL01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -986,6 +1003,9 @@ class MiniMaxVL01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         lora_config = vllm_config.lora_config
         self.config = config
         self.lora_config = lora_config
+        
+        # 添加多模态处理器信息
+        self.mm_info = MinimaxVL01MultimodalProcessorInfo(vllm_config.model_config)
 
         if not hasattr(config, "sliding_window"):
             config.sliding_window = None
@@ -1029,7 +1049,7 @@ class MiniMaxVL01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         return self.model.minimax_cache.get_seqlen_agnostic_capture_inputs(
             batch_size)
 
-    def forward(self,
+    def forward(
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
