@@ -908,6 +908,7 @@ class MiniMaxVL01Model(nn.Module):
             minimax_cache_tensors[:, slots_tensor, ...] = 0
 
     def forward(
+                self,
                 input_ids: Optional[torch.Tensor],
                 positions: torch.Tensor,
                 kv_caches: List[torch.Tensor],
