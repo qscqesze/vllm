@@ -1421,3 +1421,8 @@ class MiniMaxVL01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
 
             load_basic_weight(name, loaded_weight, self)
         return
+
+
+class AbabForCausalLM(MiniMaxVL01ForCausalLM):
+    """Abab model implementation based on MiniMaxVL01ForCausalLM."""
+    pass
