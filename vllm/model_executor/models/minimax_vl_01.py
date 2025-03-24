@@ -907,7 +907,7 @@ class MiniMaxVL01Model(nn.Module):
                                         dtype=torch.long)
             minimax_cache_tensors[:, slots_tensor, ...] = 0
 
-    def forward(self,
+    def forward(
                 input_ids: Optional[torch.Tensor],
                 positions: torch.Tensor,
                 kv_caches: List[torch.Tensor],
@@ -993,6 +993,39 @@ class MinimaxVL01MultimodalProcessorInfo(MultimodalProcessorInfo):
         return self.ctx.model_config.hf_config
 
 
+class MiniMaxVL01MultimodalProjector(nn.Module):
+    """多模态投影器，用于处理图像特征"""
+    
+    def __init__(
+        self,
+        config,
+        quant_config=None,
+        prefix="mm_projector",
+    ):
+        super().__init__()
+        self.image_processor_type = getattr(config, "image_processor_type", None)
+        self.mm_hidden_size = getattr(config, "mm_hidden_size", config.hidden_size)
+        self.hidden_size = config.hidden_size
+        
+        # 图像特征投影层
+        self.mm_projector = ReplicatedLinear(
+            self.mm_hidden_size,
+            self.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.mm_projector",
+        )
+        
+    def forward(self, image_features):
+        """处理图像特征并投影到模型隐藏空间"""
+        if image_features is None:
+            return None
+            
+        # 投影图像特征
+        image_features = self.mm_projector(image_features)
+        return image_features
+
+
 class MiniMaxVL01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -1006,6 +1039,13 @@ class MiniMaxVL01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         
         # 添加多模态处理器信息
         self.mm_info = MinimaxVL01MultimodalProcessorInfo(vllm_config.model_config)
+        
+        # 添加多模态投影器
+        self.mm_projector = MiniMaxVL01MultimodalProjector(
+            config,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "mm_projector")
+        ) if hasattr(config, "mm_hidden_size") else None
 
         if not hasattr(config, "sliding_window"):
             config.sliding_window = None
@@ -1050,14 +1090,85 @@ class MiniMaxVL01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
             batch_size)
 
     def forward(
-                input_ids: torch.Tensor,
-                positions: torch.Tensor,
-                intermediate_tensors: Optional[IntermediateTensors] = None,
-                inputs_embeds: Optional[torch.Tensor] = None,
-                **kwargs) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, self.kv_cache,
-                                   intermediate_tensors, inputs_embeds,
-                                   **kwargs)
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        image_features: Optional[torch.Tensor] = None,
+        **kwargs
+    ) -> torch.Tensor:
+        # 处理图像特征
+        if image_features is not None and self.mm_projector is not None:
+            image_features = self.mm_projector(image_features)
+            
+            # 如果提供了inputs_embeds，将图像特征与文本嵌入合并
+            if inputs_embeds is not None:
+                inputs_embeds = inputs_embeds + image_features
+            else:
+                # 否则，创建一个新的嵌入张量
+                inputs_embeds = image_features
+        
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+        if attn_metadata is None:
+            return None
+        if "request_ids_to_seq_ids" not in kwargs:
+            kwargs["request_ids_to_seq_ids"] = {}
+        if "finished_requests_ids" not in kwargs:
+            kwargs["finished_requests_ids"] = []
+        (
+            minimax_cache_tensors,
+            state_indices_tensor,
+        ) = self.model.minimax_cache.current_run_tensors(input_ids, attn_metadata,
+                                                   **kwargs)
+        if getattr(attn_metadata, "num_prefills", 0) > 0:
+            self.model._clear_prefill_cache(attn_metadata, minimax_cache_tensors,
+                                      **kwargs)
+
+        minimax_cache_params = MinimaxCacheParams(minimax_cache_tensors,
+                                                  state_indices_tensor)
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is None:
+                hidden_states = self.model.embed_scale * self.model.embed_tokens(input_ids)
+            else:
+                hidden_states = inputs_embeds
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+
+        kv_cache_index = 0
+        minimax_cache_index = 0
+        attn_metadata.rotary_emb = self.model.rotary_emb
+        for i in range(self.model.start_layer, self.model.end_layer):
+            layer = self.model.layers[i]
+            _caches = None
+            if isinstance(layer.self_attn, MiniMaxVL01Attention):
+                _caches = self.kv_cache[kv_cache_index]
+                kv_cache_index += 1
+            if isinstance(layer.self_attn, MiniMaxVL01LinearAttention):
+                current_state_layer = minimax_cache_index
+                _caches = minimax_cache_params.at_layer_idx(
+                    current_state_layer)
+                minimax_cache_index += 1
+            hidden_states, residual = layer(
+                hidden_states=hidden_states,
+                positions=positions,
+                kv_caches=_caches,
+                attn_metadata=attn_metadata,
+                residual=residual,
+            )
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({
+                "hidden_states": hidden_states,
+                "residual": residual
+            })
+        if residual is not None:
+            hidden_states, _ = self.model.norm(hidden_states, residual)
+        else:
+            hidden_states = self.model.norm(hidden_states)
 
         return hidden_states
 
