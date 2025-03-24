@@ -36,7 +36,7 @@ _TEXT_GENERATION_MODELS = {
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
     "MiniMaxText01ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     "MiniMaxVL01ForCausalLM": ("minimax_vl_01", "MiniMaxVL01ForCausalLM"),
-    "AbabForCausalLM": ("minimax_vl_01", "MiniMaxVL01ForCausalLM"),
+    "AbabForCausalLM": ("minimax_vl_01", "AbabForCausalLM"),
     # baichuan-7b, upper case 'C' in the class name
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),
     # baichuan-13b, lower case 'c' in the class name
