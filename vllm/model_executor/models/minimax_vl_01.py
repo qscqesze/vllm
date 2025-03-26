@@ -1023,11 +1023,6 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         
         # 保存配置
         self.config = config
-        
-        # 添加 language_model 属性，指向自身
-        # 这是为了与其他多模态模型保持一致的接口
-        self.language_model = self
-        self.model = self  # 添加model属性，指向自身
     
     def make_empty_intermediate_tensors(self) -> IntermediateTensors:
         """创建空的中间张量对象，用于模型并行处理"""
@@ -1052,14 +1047,26 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         if not self.has_vision_tower:
             return None
             
-        # 使用LlavaForConditionalGeneration的实现
-        from vllm.model_executor.models.llava import LlavaForConditionalGeneration
-        dummy_llava = LlavaForConditionalGeneration.__new__(LlavaForConditionalGeneration)
-        dummy_llava.config = self.config
-        dummy_llava.vision_tower = self.vision_tower
-        dummy_llava.multi_modal_projector = self.multi_modal_projector
+        # 修复：直接实现多模态嵌入的获取，而不是依赖LlavaForConditionalGeneration
+        if "images" not in kwargs:
+            return None
+            
+        images = kwargs["images"]
+        if images is None or len(images) == 0:
+            return None
+            
+        # 处理图像并获取视觉特征
+        with torch.no_grad():
+            image_features = self.vision_tower(images)
+            
+        # 应用投影器
+        image_features = self.multi_modal_projector(image_features)
         
-        return dummy_llava.get_multimodal_embeddings(**kwargs)
+        # 创建多模态嵌入对象
+        return MultiModalEmbeddings(
+            embeddings=image_features,
+            positions=kwargs.get("image_positions", None)
+        )
     
     def get_input_embeddings(
         self,
@@ -1070,13 +1077,17 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         if not self.has_vision_tower or multimodal_embeddings is None:
             return self.embed_scale * self.embed_tokens(input_ids)
             
-        # 使用LlavaForConditionalGeneration的实现
-        from vllm.model_executor.models.llava import LlavaForConditionalGeneration
-        dummy_llava = LlavaForConditionalGeneration.__new__(LlavaForConditionalGeneration)
-        dummy_llava.config = self.config
-        dummy_llava.language_model = self
+        # 修复：直接实现输入嵌入的获取，而不是依赖LlavaForConditionalGeneration
+        text_embeddings = self.embed_scale * self.embed_tokens(input_ids)
         
-        return dummy_llava.get_input_embeddings(input_ids, multimodal_embeddings)
+        # 如果有图像位置信息，则在指定位置插入图像特征
+        if multimodal_embeddings.positions is not None:
+            for i, (seq_idx, pos_idx) in enumerate(multimodal_embeddings.positions):
+                if i < len(multimodal_embeddings.embeddings):
+                    # 在指定位置插入图像特征
+                    text_embeddings[seq_idx, pos_idx] = multimodal_embeddings.embeddings[i]
+        
+        return text_embeddings
     
     def forward(
         self,
@@ -1093,8 +1104,10 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         elif inputs_embeds is None and self.has_vision_tower:
             # 获取多模态嵌入
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
-            input_ids = None  # 使用inputs_embeds时不需要input_ids
+            if vision_embeddings is not None:
+                inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
+            else:
+                inputs_embeds = self.get_input_embeddings(input_ids, None)
             
         # 调用父类的forward方法
         return super().forward(
