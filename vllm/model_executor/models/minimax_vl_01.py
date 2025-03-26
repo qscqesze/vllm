@@ -1046,8 +1046,7 @@ class MiniMaxVL01ForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         from vllm.model_executor.model_loader.weight_utils import default_weight_loader
         from vllm.model_executor.models.utils import AutoWeightsLoader
         
-        # 使用 AutoWeightsLoader 来处理权重加载
-        # 这个类能够正确处理生成器类型的权重输入
+        # 创建 AutoWeightsLoader 实例
         loader = AutoWeightsLoader(self)
         
         # 定义权重路径映射规则
@@ -1055,8 +1054,8 @@ class MiniMaxVL01ForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             'language_model.model.': ''  # 移除前缀
         }
         
-        # 使用 loader 加载权重
-        return loader.load_weights(weights, weights_mapper)
+        # 使用 mapper 参数而不是位置参数
+        return loader.load_weights(weights, mapper=weights_mapper)
     
     def make_empty_intermediate_tensors(self) -> IntermediateTensors:
         """创建空的中间张量对象，用于模型并行处理"""
