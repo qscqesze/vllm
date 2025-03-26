@@ -35,10 +35,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding,
-    pad_vocab_size)
+    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import maybe_prefix, AutoWeightLoader
+from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.model_executor.models.interfaces import SupportsMultiModal
@@ -57,10 +56,6 @@ from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
                     LlavaMultiModalProjector, init_vision_tower_for_llava)
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from vllm.model_executor.layers.sampler import SamplerOutput
-from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
-                         SupportsMultiModal, SupportsPP)
-
-from vllm.model_executor.models.registry import ModelRegistry
 
 def replace_weight_name(name: str,
                         key: str = None,
@@ -629,8 +624,6 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 linear_layer_idx=linear_layer_id,
                 prefix=prefix)
         elif config.attention_type == 1:
-            # 获取sliding_window属性，如果不存在则使用None
-            sliding_window = getattr(config, "sliding_window", None)
             self.self_attn = MiniMaxText01Attention(
                 hidden_size=self.hidden_size,
                 num_heads=config.num_attention_heads,
@@ -640,14 +633,14 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 num_kv_heads=config.num_key_value_heads,
                 max_position=max_position_embeddings,
                 rope_theta=rope_theta,
-                sliding_window=sliding_window,
+                sliding_window=config.sliding_window,
                 quant_config=quant_config,
                 layer_idx=self._ilayer,
                 cache_config=cache_config,
                 prefix=prefix)
         else:
             raise ValueError(
-                f"Unsupported attention type: {config.attention_type}")
+                f"Unsupported attention type: {self.config.attention_type}")
 
         if expert_num == 1:
             self.mlp = MiniMaxText01MLP(
@@ -852,14 +845,10 @@ class MiniMaxVL01Model(nn.Module):
         rope_theta = getattr(config, "rope_theta", 10000)
         head_dim = getattr(config, "head_dim",
                            config.hidden_size // config.num_attention_heads)
-        
-        # 修复：确保max_position_embeddings变量正确定义
-        max_position_embeddings = config.max_position_embeddings
         if hasattr(config, "max_model_len") and isinstance(
                 config.max_model_len, int):
             max_position_embeddings = min(config.max_position_embeddings,
                                           config.max_model_len)
-                                          
         self.rotary_emb = MiniMaxText01RotaryEmbedding(
             head_dim,
             rotary_dim=config.rotary_dim
@@ -972,27 +961,23 @@ class MiniMaxVL01Model(nn.Module):
 
         return hidden_states
 
+
 @MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor,
                                        info=LlavaProcessingInfo,
                                        dummy_inputs=LlavaDummyInputsBuilder)
-class AbabForCausalLM(nn.Module, SupportsMultiModal):
+class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     """MiniMaxText01 model with multimodal capabilities."""
     
     def __init__(
         self,
-        vllm_config=None,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: Optional[CacheConfig] = None,
+        scheduler_config=None,
         prefix: str = "",
     ) -> None:
-        print("AbabForCausalLM init")
-        super().__init__()
-        
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        cache_config = vllm_config.cache_config
-        scheduler_config = vllm_config.scheduler_config
-        
-        # 创建语言模型
-        self.model = MiniMaxVL01Model(
+        # 首先调用父类的初始化方法
+        super().__init__(
             config=config,
             quant_config=quant_config,
             cache_config=cache_config,
@@ -1001,185 +986,102 @@ class AbabForCausalLM(nn.Module, SupportsMultiModal):
         )
         
         # 初始化多模态组件
-        self.has_vision_tower = hasattr(config, "vision_config")
-        
-        if self.has_vision_tower:
-            # 初始化视觉塔和投影器
-            self.vision_tower = init_vision_tower_for_llava(
-                config,
-                quant_config,
-                require_post_norm=False,
-                prefix=maybe_prefix(prefix, "vision_tower"))
-                
-            # 确保必要的配置属性存在
-            if not hasattr(config, "projector_hidden_act"):
-                config.projector_hidden_act = "gelu"
-            if not hasattr(config, "multimodal_projector_bias"):
-                config.multimodal_projector_bias = True
-                
-            # 初始化多模态投影器
-            self.multi_modal_projector = LlavaMultiModalProjector(
-                vision_hidden_size=config.vision_config.hidden_size,
-                text_hidden_size=config.hidden_size,
-                projector_hidden_act=config.projector_hidden_act,
-                multimodal_projector_bias=config.multimodal_projector_bias,
-                prefix=maybe_prefix(prefix, "multi_modal_projector"))
-        else:
-            # 创建空的视觉塔和投影器
-            self.vision_tower = None
-            self.multi_modal_projector = None
-        
-        # 添加LM头
-        if get_pp_group().is_last_rank:
-            # 计算填充后的词汇表大小
-            tp_size = get_tensor_model_parallel_world_size()
-            vocab_size = config.vocab_size
-            padded_vocab_size = pad_vocab_size(vocab_size, DEFAULT_VOCAB_PADDING_SIZE)
+        # 确保vision_config存在
+        if not hasattr(config, "vision_config"):
+            raise ValueError("模型配置中缺少vision_config，无法初始化视觉模块")
             
-            self.lm_head = ParallelLMHead(
-                config.hidden_size,
-                padded_vocab_size,
-                org_num_embeddings=vocab_size,
-                bias=False,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
-            )
-        else:
-            self.lm_head = PPMissingLayer()
+        # 初始化视觉塔和投影器
+        self.vision_tower = init_vision_tower_for_llava(
+            config,
+            quant_config,
+            require_post_norm=False,
+            prefix=maybe_prefix(prefix, "vision_tower"))
+            
+        # 确保必要的配置属性存在
+        if not hasattr(config, "projector_hidden_act"):
+            config.projector_hidden_act = "gelu"
+        if not hasattr(config, "multimodal_projector_bias"):
+            config.multimodal_projector_bias = True
+            
+        self.multi_modal_projector = LlavaMultiModalProjector(
+            vision_hidden_size=config.vision_config.hidden_size,
+            text_hidden_size=config.hidden_size,
+            projector_hidden_act=config.projector_hidden_act,
+            multimodal_projector_bias=config.multimodal_projector_bias)
         
         # 保存配置
         self.config = config
     
     @classmethod
-    def from_vllm_config(cls, vllm_config):
+    def from_vllm_config(cls, vllm_config: VllmConfig, prefix: str = ""):
         """从vllm_config创建模型实例的工厂方法"""
         return cls(
-            vllm_config=vllm_config,
-            prefix=""
+            config=vllm_config.model_config.hf_config,
+            quant_config=vllm_config.quant_config,
+            cache_config=vllm_config.cache_config,
+            scheduler_config=vllm_config.scheduler_config,
+            prefix=prefix
         )
     
     def get_multimodal_embeddings(self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
-        # 如果没有视觉塔，则返回None
-        if not self.has_vision_tower:
-            return None
-            
-        # 处理图像输入
-        if "images" not in kwargs:
-            return None
-            
-        images = kwargs["images"]
-        if images is None or len(images) == 0:
-            return None
-            
-        # 处理图像并获取视觉特征
-        with torch.no_grad():
-            image_features = self.vision_tower(images)
-            
-        # 应用投影器
-        image_features = self.multi_modal_projector(image_features)
+        # 使用LlavaForConditionalGeneration的实现
+        from vllm.model_executor.models.llava import LlavaForConditionalGeneration
+        dummy_llava = LlavaForConditionalGeneration.__new__(LlavaForConditionalGeneration)
+        dummy_llava.config = self.config
+        dummy_llava.vision_tower = self.vision_tower
+        dummy_llava.multi_modal_projector = self.multi_modal_projector
         
-        # 创建多模态嵌入对象
-        return MultiModalEmbeddings(
-            embeddings=image_features,
-            positions=kwargs.get("image_positions", None)
-        )
+        return dummy_llava.get_multimodal_embeddings(**kwargs)
+    
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> torch.Tensor:
+        # 使用LlavaForConditionalGeneration的实现
+        from vllm.model_executor.models.llava import LlavaForConditionalGeneration
+        dummy_llava = LlavaForConditionalGeneration.__new__(LlavaForConditionalGeneration)
+        dummy_llava.config = self.config
+        dummy_llava.language_model = self
+        
+        return dummy_llava.get_input_embeddings(input_ids, multimodal_embeddings)
     
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        # 处理多模态输入
-        inputs_embeds = None
-        if intermediate_tensors is None and self.has_vision_tower:
-            # 获取多模态嵌入
+        if intermediate_tensors is not None:
+            inputs_embeds = None
+        elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            if vision_embeddings is not None and get_pp_group().is_first_rank:
-                # 获取文本嵌入
-                text_embeddings = self.model.embed_scale * self.model.embed_tokens(input_ids)
-                
-                # 如果有图像位置信息，则在指定位置插入图像特征
-                if vision_embeddings.positions is not None:
-                    for i, (seq_idx, pos_idx) in enumerate(vision_embeddings.positions):
-                        if i < len(vision_embeddings.embeddings):
-                            # 在指定位置插入图像特征
-                            text_embeddings[seq_idx, pos_idx] = vision_embeddings.embeddings[i]
-                
-                inputs_embeds = text_embeddings
-        
-        # 调用语言模型的forward方法
-        hidden_states = self.model.forward(
-            input_ids=input_ids,
-            positions=positions,
-            kv_caches=kv_caches,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-            **kwargs
-        )
-        
-        return hidden_states
+            inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
+            input_ids = None
+            
+        return super().forward(input_ids, positions, intermediate_tensors, inputs_embeds)
     
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata,
+        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        """计算logits"""
+        # 需要实现这个方法，而不是调用父类的方法
+        # 因为MiniMaxVL01Model没有实现compute_logits
         if get_pp_group().is_last_rank:
-            return self.lm_head(hidden_states)
+            logits_processor = LogitsProcessor(self.vocab_size)
+            return logits_processor(hidden_states)
         return None
     
     def sample(
         self,
         logits: torch.Tensor,
-        sampling_metadata,
+        sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        """采样生成token"""
+        # 需要实现这个方法，而不是调用父类的方法
         if get_pp_group().is_last_rank:
             sampler = Sampler()
             return sampler(logits, sampling_metadata)
         return None
-        
-    def load_weights(self, weights):
-        """处理各种可能的权重路径格式"""
-        from vllm.model_executor.models.utils import AutoWeightLoader
-        
-        # 将生成器转换为列表，以便可以多次迭代
-        weights_list = list(weights)
-        
-        # 定义可能的前缀映射规则
-        prefix_mappings = {
-            'language_model.model.': 'model.',
-            'model.': 'model.',
-            'language_model.lm_head.': 'lm_head.',
-        }
-        
-        # 保持不变的模块
-        preserve_modules = ['vision_tower.', 'multi_modal_projector.']
-        
-        # 应用映射规则
-        mapped_weights = []
-        for name, tensor in weights_list:
-            # 检查是否是需要保持不变的模块
-            if any(name.startswith(module) for module in preserve_modules):
-                mapped_weights.append((name, tensor))
-                continue
-            
-            # 应用前缀替换规则
-            new_name = name
-            for prefix, replacement in prefix_mappings.items():
-                if name.startswith(prefix):
-                    new_name = replacement + name[len(prefix):]
-                    break
-                
-            mapped_weights.append((new_name, tensor))
-        
-        # 使用AutoWeightLoader加载权重
-        loader = AutoWeightLoader(self)
-        return loader.load_weights(mapped_weights)
-        
-    def make_empty_intermediate_tensors(self):
-        """创建空的中间张量"""
-        return self.model.make_empty_intermediate_tensors()
