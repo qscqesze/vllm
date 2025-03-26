@@ -1381,13 +1381,25 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         def load_basic_weight(name: str, loaded_weight: torch.Tensor) -> None:
             if OPEN_DEBUG:
                 print(f"{AbabForCausalLM.__name__}.[BASIC] load weight name = {name}")
-            param = params_dict[name]
+            
+            # 处理权重名称前缀，移除 "model." 前缀
+            param_name = name
+            if name.startswith("model."):
+                param_name = name[len("model."):]
+            
+            # 尝试获取参数，如果不存在则记录并跳过
+            if param_name not in params_dict:
+                if OPEN_DEBUG:
+                    print(f"{AbabForCausalLM.__name__}.[BASIC] param {param_name} not found, skipping")
+                return
+                
+            param = params_dict[param_name]
             if OPEN_DEBUG:
                 print(f"{AbabForCausalLM.__name__}.[BASIC] param.shape = {param.data.shape}")
                 print(f"{AbabForCausalLM.__name__}.[BASIC] loaded_weight.shape = {loaded_weight.shape}")
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
-            weight_loader = weight_loader_with_alias(name)(weight_loader)
+            weight_loader = weight_loader_with_alias(param_name)(weight_loader)
             if OPEN_DEBUG:
                 print(f"{AbabForCausalLM.__name__}.[BASIC] weight_loader = {weight_loader}")
             weight_loader(param, loaded_weight)
@@ -1402,19 +1414,24 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
                 print(f"{AbabForCausalLM.__name__}.----------------- layer = {weight_at_layer} | {layer_attn_type} -----------------")
                 print(f"{AbabForCausalLM.__name__}.loaded hf-weight = {name}, shape = {loaded_weight.shape if loaded_weight is not None else None}")
 
-            if is_layer_norm_weight(name):
+            # 处理权重名称前缀，移除 "model." 前缀用于检查
+            check_name = name
+            if name.startswith("model."):
+                check_name = name[len("model."):]
+
+            if is_layer_norm_weight(check_name):
                 load_layer_norm_weight(name, loaded_weight)
                 continue
-            if is_mha_weight(name):
+            if is_mha_weight(check_name):
                 if is_linear_attn_layer(weight_at_layer):
                     load_linear_attn_weight(name, loaded_weight)
                 else:
                     load_flash_attn_weight(name, loaded_weight)
                 continue
-            if is_moe_weight(name):
+            if is_moe_weight(check_name):
                 load_sparse_moe_weight(name, loaded_weight)
                 continue
-            if is_shared_mlp_weight(name):
+            if is_shared_mlp_weight(check_name):
                 load_shared_mlp_weight(name, loaded_weight)
                 continue
 
