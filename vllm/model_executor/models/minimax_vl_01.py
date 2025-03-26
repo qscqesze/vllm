@@ -624,6 +624,8 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 linear_layer_idx=linear_layer_id,
                 prefix=prefix)
         elif config.attention_type == 1:
+            # 获取sliding_window属性，如果不存在则为None
+            sliding_window = getattr(config, "sliding_window", None)
             self.self_attn = MiniMaxText01Attention(
                 hidden_size=self.hidden_size,
                 num_heads=config.num_attention_heads,
@@ -633,7 +635,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 num_kv_heads=config.num_key_value_heads,
                 max_position=max_position_embeddings,
                 rope_theta=rope_theta,
-                sliding_window=config.sliding_window,
+                sliding_window=sliding_window,
                 quant_config=quant_config,
                 layer_idx=self._ilayer,
                 cache_config=cache_config,
@@ -1011,6 +1013,17 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         
         # 保存配置
         self.config = config
+        
+        # 初始化lm_head
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.hidden_size,
+                self.vocab_size,
+                org_num_embeddings=self.vocab_size,
+                bias=False,
+            )
+        else:
+            self.lm_head = PPMissingLayer()
     
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig, prefix: str = ""):
@@ -1050,6 +1063,7 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
@@ -1061,7 +1075,14 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
             input_ids = None
             
-        return super().forward(input_ids, positions, intermediate_tensors, inputs_embeds)
+        return super().forward(
+            input_ids=input_ids, 
+            positions=positions, 
+            kv_caches=kv_caches,
+            intermediate_tensors=intermediate_tensors, 
+            inputs_embeds=inputs_embeds,
+            **kwargs
+        )
     
     def compute_logits(
         self,
@@ -1071,8 +1092,7 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         # 需要实现这个方法，而不是调用父类的方法
         # 因为MiniMaxVL01Model没有实现compute_logits
         if get_pp_group().is_last_rank:
-            logits_processor = LogitsProcessor(self.vocab_size)
-            return logits_processor(hidden_states)
+            return self.lm_head(hidden_states)
         return None
     
     def sample(
