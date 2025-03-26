@@ -969,21 +969,24 @@ class MiniMaxVL01Model(nn.Module):
             hidden_states = self.norm(hidden_states)
 
         return hidden_states
+
 @MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor,
                                        info=LlavaProcessingInfo,
                                        dummy_inputs=LlavaDummyInputsBuilder)
-class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
+class AbabForCausalLM(nn.Module, SupportsMultiModal):
     """MiniMaxText01 model with multimodal capabilities."""
     
     def __init__(
         self,
-        config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        scheduler_config=None,
+        vllm_config=None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        cache_config = vllm_config.cache_config
+        scheduler_config = vllm_config.scheduler_config
         
         # 创建语言模型
         self.model = MiniMaxVL01Model(
@@ -1044,14 +1047,11 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         self.config = config
     
     @classmethod
-    def from_vllm_config(cls, vllm_config: VllmConfig, prefix: str = ""):
+    def from_vllm_config(cls, vllm_config):
         """从vllm_config创建模型实例的工厂方法"""
         return cls(
-            config=vllm_config.model_config.hf_config,
-            quant_config=vllm_config.quant_config,
-            cache_config=vllm_config.cache_config,
-            scheduler_config=vllm_config.scheduler_config,
-            prefix=prefix
+            vllm_config=vllm_config,
+            prefix=""
         )
     
     def get_multimodal_embeddings(self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
@@ -1121,7 +1121,7 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
+        sampling_metadata,
     ) -> Optional[torch.Tensor]:
         """计算logits"""
         if get_pp_group().is_last_rank:
@@ -1131,7 +1131,7 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     def sample(
         self,
         logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
+        sampling_metadata,
     ) -> Optional[SamplerOutput]:
         """采样生成token"""
         if get_pp_group().is_last_rank:
