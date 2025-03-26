@@ -1042,35 +1042,41 @@ class MiniMaxVL01ForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         self.config = config
     
     def load_weights(self, weights):
-        """自定义权重加载方法，处理模型结构与权重路径不匹配的问题"""
+        """处理各种可能的权重路径格式"""
         from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-        from vllm.model_executor.models.utils import AutoWeightsLoader
-        
-        # 创建 AutoWeightsLoader 实例
-        loader = AutoWeightsLoader(self)
-        
-        # 定义权重路径映射规则
-        weights_mapper = {
-            'language_model.model.': '',  # 移除前缀
-            'language_model.lm_head.': 'lm_head.',  # 映射lm_head
-            'vision_tower.': 'vision_tower.',  # 保持视觉塔路径不变
-            'multi_modal_projector.': 'multi_modal_projector.'  # 保持投影器路径不变
-        }
         
         # 将生成器转换为列表，以便可以多次迭代
         weights_list = list(weights)
         
-        # 使用正确的方式应用映射
+        # 定义可能的前缀映射规则
+        prefix_mappings = {
+            'language_model.model.': '',
+            'model.': '',
+            'language_model.lm_head.': 'lm_head.',
+        }
+        
+        # 保持不变的模块
+        preserve_modules = ['vision_tower.', 'multi_modal_projector.']
+        
+        # 应用映射规则
         mapped_weights = []
         for name, tensor in weights_list:
+            # 检查是否是需要保持不变的模块
+            if any(name.startswith(module) for module in preserve_modules):
+                mapped_weights.append((name, tensor))
+                continue
+            
+            # 应用前缀替换规则
             new_name = name
-            for old_prefix, new_prefix in weights_mapper.items():
-                if name.startswith(old_prefix):
-                    new_name = new_prefix + name[len(old_prefix):]
+            for prefix, replacement in prefix_mappings.items():
+                if name.startswith(prefix):
+                    new_name = replacement + name[len(prefix):]
                     break
+                
             mapped_weights.append((new_name, tensor))
         
-        return loader.load_weights(mapped_weights)
+        # 使用默认的权重加载器加载映射后的权重
+        return default_weight_loader(self, mapped_weights)
     
     def make_empty_intermediate_tensors(self) -> IntermediateTensors:
         """创建空的中间张量对象，用于模型并行处理"""
