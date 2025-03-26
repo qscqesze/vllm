@@ -1135,6 +1135,10 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         # 创建一个新的权重列表，应用必要的名称映射
         mapped_weights = []
         for name, tensor in weights_list:
+            # 跳过单独的'model'权重
+            if name == 'model' or name == 'language_model.model':
+                continue
+            
             # 处理视觉塔和多模态投影器的权重
             if name.startswith('vision_tower.') or name.startswith('multi_modal_projector.'):
                 mapped_weights.append((name, tensor))
@@ -1170,9 +1174,6 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
                 # 移除 'model.' 前缀
                 new_name = name[len('model.'):]
                 mapped_weights.append((new_name, tensor))
-            elif name == 'model':
-                # 跳过单独的'model'权重，这可能是一个错误的权重名称
-                continue
             elif name.startswith('language_model.lm_head.'):
                 # 将 'language_model.lm_head.' 替换为 'lm_head.'
                 new_name = 'lm_head.' + name[len('language_model.lm_head.'):]
