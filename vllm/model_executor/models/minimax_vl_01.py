@@ -57,6 +57,8 @@ from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
                     LlavaMultiModalProjector, init_vision_tower_for_llava)
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from vllm.model_executor.layers.sampler import SamplerOutput
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+                         SupportsMultiModal, SupportsPP)
 
 def replace_weight_name(name: str,
                         key: str = None,
@@ -967,12 +969,10 @@ class MiniMaxVL01Model(nn.Module):
             hidden_states = self.norm(hidden_states)
 
         return hidden_states
-
-
 @MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor,
                                        info=LlavaProcessingInfo,
                                        dummy_inputs=LlavaDummyInputsBuilder)
-class AbabForCausalLM(nn.Module, SupportsMultiModal):
+class AbabForCausalLM(nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP):
     """MiniMaxText01 model with multimodal capabilities."""
     
     def __init__(
