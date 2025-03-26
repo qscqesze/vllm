@@ -1126,3 +1126,37 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             sampler = Sampler()
             return sampler(logits, sampling_metadata)
         return None
+
+    def load_weights(self, weights):
+        """处理各种可能的权重路径格式"""
+        # 将生成器转换为列表，以便可以多次迭代
+        weights_list = list(weights)
+        
+        # 创建一个新的权重列表，应用必要的名称映射
+        mapped_weights = []
+        for name, tensor in weights_list:
+            # 处理视觉塔和多模态投影器的权重
+            if name.startswith('vision_tower.') or name.startswith('multi_modal_projector.'):
+                mapped_weights.append((name, tensor))
+                continue
+            
+            # 处理语言模型权重
+            if name.startswith('language_model.model.'):
+                # 移除 'language_model.model.' 前缀
+                new_name = name[len('language_model.model.'):]
+                mapped_weights.append((new_name, tensor))
+            elif name.startswith('model.'):
+                # 移除 'model.' 前缀
+                new_name = name[len('model.'):]
+                mapped_weights.append((new_name, tensor))
+            elif name.startswith('language_model.lm_head.'):
+                # 将 'language_model.lm_head.' 替换为 'lm_head.'
+                new_name = 'lm_head.' + name[len('language_model.lm_head.'):]
+                mapped_weights.append((new_name, tensor))
+            else:
+                # 保持其他权重不变
+                mapped_weights.append((name, tensor))
+        
+        # 使用默认的权重加载器加载映射后的权重
+        from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+        return default_weight_loader(self, mapped_weights)
