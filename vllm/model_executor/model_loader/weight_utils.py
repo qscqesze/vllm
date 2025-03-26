@@ -523,21 +523,27 @@ def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
     return x
 
 
-def default_weight_loader(param: torch.Tensor,
-                          loaded_weight: torch.Tensor) -> None:
-    """Default weight loader."""
+def default_weight_loader(module, weights):
+    # 检查 default_weight_loader 的实现
+    # 根据实现修改 minimax_vl_01.py 中的调用方式
+    
+    # 如果 default_weight_loader 期望的是模块的参数字典，而不是模块本身
+    # 那么我们需要在 minimax_vl_01.py 中相应地修改调用
+    
+    # 如果 default_weight_loader 期望的是模块本身，那么我们需要确保
+    # AbabForCausalLM 类实现了所需的方法或属性
     try:
-        if param.numel() == 1 and loaded_weight.numel() == 1:
+        if module.numel() == 1 and weights.numel() == 1:
             # Sometimes scalar values aren't considered tensors with shapes
-            # so if both param and loaded_weight are a scalar,
+            # so if both module and weights are a scalar,
             # "broadcast" instead of copy
-            param.data.fill_(loaded_weight.item())
+            module.data.fill_(weights.item())
         else:
-            assert param.size() == loaded_weight.size(), (
-                f"Attempted to load weight ({loaded_weight.size()}) "
-                f"into parameter ({param.size()})")
+            assert module.size() == weights.size(), (
+                f"Attempted to load weight ({weights.size()}) "
+                f"into parameter ({module.size()})")
 
-            param.data.copy_(loaded_weight)
+            module.data.copy_(weights)
     except Exception:
         # NOTE: This exception is added for the purpose of setting breakpoint to
         # debug weight loading issues.
