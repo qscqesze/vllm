@@ -1043,20 +1043,20 @@ class MiniMaxVL01ForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     
     def load_weights(self, weights):
         """自定义权重加载方法，处理模型结构与权重路径不匹配的问题"""
-        from vllm.model_executor.models.utils import WeightsMapper
+        from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+        from vllm.model_executor.models.utils import AutoWeightsLoader
         
-        # 处理权重路径映射
-        # 如果权重中包含'language_model.model'前缀，需要移除它
-        processed_weights = {}
-        for name, tensor in weights.items():
-            if name.startswith('language_model.model.'):
-                new_name = name.replace('language_model.model.', '')
-                processed_weights[new_name] = tensor
-            else:
-                processed_weights[name] = tensor
+        # 使用 AutoWeightsLoader 来处理权重加载
+        # 这个类能够正确处理生成器类型的权重输入
+        loader = AutoWeightsLoader(self)
         
-        # 使用默认的权重加载器
-        return default_weight_loader(self, processed_weights)
+        # 定义权重路径映射规则
+        weights_mapper = {
+            'language_model.model.': ''  # 移除前缀
+        }
+        
+        # 使用 loader 加载权重
+        return loader.load_weights(weights, weights_mapper)
     
     def make_empty_intermediate_tensors(self) -> IntermediateTensors:
         """创建空的中间张量对象，用于模型并行处理"""
