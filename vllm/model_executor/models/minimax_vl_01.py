@@ -1170,6 +1170,9 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
                 # 移除 'model.' 前缀
                 new_name = name[len('model.'):]
                 mapped_weights.append((new_name, tensor))
+            elif name == 'model':
+                # 跳过单独的'model'权重，这可能是一个错误的权重名称
+                continue
             elif name.startswith('language_model.lm_head.'):
                 # 将 'language_model.lm_head.' 替换为 'lm_head.'
                 new_name = 'lm_head.' + name[len('language_model.lm_head.'):]
