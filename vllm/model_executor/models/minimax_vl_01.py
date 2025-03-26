@@ -1029,7 +1029,59 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             )
         else:
             self.lm_head = PPMissingLayer()
+        
+        # 为词汇嵌入和语言模型头设置自定义权重加载器
+        if get_pp_group().is_first_rank and hasattr(self, 'embed_tokens'):
+            self.embed_tokens.weight.weight_loader = self.embed_tokens_weight_loader
+            
+        if get_pp_group().is_last_rank and hasattr(self, 'lm_head'):
+            self.lm_head.weight.weight_loader = self.lm_head_weight_loader
     
+    @staticmethod
+    def embed_tokens_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        """自定义的词汇嵌入权重加载器，处理词汇大小不匹配的情况"""
+        if OPEN_DEBUG:
+            print(f"embed_tokens_weight_loader: param.shape={param.shape}, loaded_weight.shape={loaded_weight.shape}")
+        
+        # 获取张量模型并行世界大小和排名
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        
+        # 计算每个分片的大小
+        vocab_size = loaded_weight.shape[0]
+        shard_size = vocab_size // tp_size
+        padding_size = DEFAULT_VOCAB_PADDING_SIZE
+        
+        # 计算当前分片的范围
+        start_idx = tp_rank * shard_size
+        end_idx = min((tp_rank + 1) * shard_size, vocab_size)
+        
+        # 复制权重到参数
+        if start_idx < vocab_size:
+            param[:end_idx-start_idx].data.copy_(loaded_weight[start_idx:end_idx])
+    
+    @staticmethod
+    def lm_head_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        """自定义的语言模型头权重加载器，处理词汇大小不匹配的情况"""
+        if OPEN_DEBUG:
+            print(f"lm_head_weight_loader: param.shape={param.shape}, loaded_weight.shape={loaded_weight.shape}")
+        
+        # 获取张量模型并行世界大小和排名
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        
+        # 计算每个分片的大小
+        vocab_size = loaded_weight.shape[0]
+        shard_size = vocab_size // tp_size
+        
+        # 计算当前分片的范围
+        start_idx = tp_rank * shard_size
+        end_idx = min((tp_rank + 1) * shard_size, vocab_size)
+        
+        # 复制权重到参数
+        if start_idx < vocab_size:
+            param[:end_idx-start_idx].data.copy_(loaded_weight[start_idx:end_idx])
+
     def make_empty_intermediate_tensors(self) -> IntermediateTensors:
         """创建空的中间张量，用于模型并行处理。"""
         return IntermediateTensors({
