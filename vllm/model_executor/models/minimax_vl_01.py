@@ -1195,5 +1195,13 @@ class MiniMaxVL01ForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             return sampler(logits, sampling_metadata)
         return None
 
-# 为了向后兼容，保留原始类名作为别名
+# 为了向后兼容，创建别名并确保它也被注册
 AbabForCausalLM = MiniMaxVL01ForCausalLM
+
+# 从ModelRegistry导入并注册AbabForCausalLM架构
+from vllm.model_executor.models.registry import ModelRegistry
+ModelRegistry.register_model_class(
+    "AbabForCausalLM", 
+    AbabForCausalLM, 
+    aliases=["MiniMaxVL01ForCausalLM"]
+)
