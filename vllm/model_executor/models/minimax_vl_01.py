@@ -972,7 +972,7 @@ class MiniMaxVL01Model(nn.Module):
 @MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor,
                                        info=LlavaProcessingInfo,
                                        dummy_inputs=LlavaDummyInputsBuilder)
-class MiniMaxVL01ForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
+class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     """MiniMaxText01 model with multimodal capabilities."""
     
     def __init__(
@@ -1194,14 +1194,3 @@ class MiniMaxVL01ForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             sampler = Sampler()
             return sampler(logits, sampling_metadata)
         return None
-
-# 为了向后兼容，创建别名并确保它也被注册
-AbabForCausalLM = MiniMaxVL01ForCausalLM
-
-# 从ModelRegistry导入并注册AbabForCausalLM架构
-from vllm.model_executor.models.registry import ModelRegistry
-ModelRegistry.register_model_class(
-    "AbabForCausalLM", 
-    AbabForCausalLM, 
-    aliases=["MiniMaxVL01ForCausalLM"]
-)
