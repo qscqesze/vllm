@@ -1202,17 +1202,29 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
                 if weight_name not in name:
                     continue
                 origin_name = name
-                name = name.replace(weight_name, param_name)
+                # 修复：保留正确的路径结构，只替换最后的权重名称部分
+                param_path = name.rsplit(".", 1)[0]  # 获取路径部分，去掉最后的权重名
+                param_path = param_path.replace(f"experts.{expert_id}", "experts")  # 移除专家ID
+                if param_path.startswith("model."):
+                    param_path = param_path[len("model."):]  # 移除"model."前缀
+                new_name = f"{param_path}.{param_name}"
+                
                 if OPEN_DEBUG:
                     print(f"{AbabForCausalLM.__name__}.[MOE] load weights param_name = {param_name}, weight_name = {weight_name}, expert_id = {expert_id}")
-                    print(f"{AbabForCausalLM.__name__}.[MOE] name = {origin_name} -> {name}, weight_name = {weight_name}, param_name = {param_name}")
-                param = params_dict[name]
+                    print(f"{AbabForCausalLM.__name__}.[MOE] name = {origin_name} -> {new_name}, weight_name = {weight_name}, param_name = {param_name}")
+                
+                if new_name not in params_dict:
+                    if OPEN_DEBUG:
+                        print(f"{AbabForCausalLM.__name__}.[MOE] param {new_name} not found, skipping")
+                    continue
+                    
+                param = params_dict[new_name]
                 weight_loader = param.weight_loader
                 if OPEN_DEBUG:
                     print(f"{AbabForCausalLM.__name__}.[MOE] param.shape = {param.data.shape}")
                     print(f"{AbabForCausalLM.__name__}.[MOE] loaded_weight.shape = {loaded_weight.shape}")
                     print(f"{AbabForCausalLM.__name__}.[MOE] weight_loader = {weight_loader}")
-                weight_loader = weight_loader_with_alias(name)(weight_loader)
+                weight_loader = weight_loader_with_alias(new_name)(weight_loader)
                 weight_loader(param,
                               loaded_weight,
                               weight_name,
@@ -1221,13 +1233,23 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             else:
                 if OPEN_DEBUG:
                     print(f"{AbabForCausalLM.__name__}.[MOE] load weight name = {name}")
-                param = params_dict[name]
+                # 处理权重名称前缀，移除 "model." 前缀
+                param_name = name
+                if name.startswith("model."):
+                    param_name = name[len("model."):]
+                    
+                if param_name not in params_dict:
+                    if OPEN_DEBUG:
+                        print(f"{AbabForCausalLM.__name__}.[MOE] param {param_name} not found, skipping")
+                    return
+                    
+                param = params_dict[param_name]
                 if OPEN_DEBUG:
                     print(f"{AbabForCausalLM.__name__}.[MOE] param.shape = {param.data.shape}")
                     print(f"{AbabForCausalLM.__name__}.[MOE] loaded_weight.shape = {loaded_weight.shape}")
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                weight_loader = weight_loader_with_alias(name)(weight_loader)
+                weight_loader = weight_loader_with_alias(param_name)(weight_loader)
                 if OPEN_DEBUG:
                     print(f"{AbabForCausalLM.__name__}.[MOE] weight_loader = {weight_loader}")
                 weight_loader(param, loaded_weight)
