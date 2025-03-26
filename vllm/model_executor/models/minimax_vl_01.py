@@ -624,6 +624,8 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 linear_layer_idx=linear_layer_id,
                 prefix=prefix)
         elif config.attention_type == 1:
+            # 获取sliding_window属性，如果不存在则使用None
+            sliding_window = getattr(config, "sliding_window", None)
             self.self_attn = MiniMaxText01Attention(
                 hidden_size=self.hidden_size,
                 num_heads=config.num_attention_heads,
@@ -633,14 +635,14 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 num_kv_heads=config.num_key_value_heads,
                 max_position=max_position_embeddings,
                 rope_theta=rope_theta,
-                sliding_window=config.sliding_window,
+                sliding_window=sliding_window,
                 quant_config=quant_config,
                 layer_idx=self._ilayer,
                 cache_config=cache_config,
                 prefix=prefix)
         else:
             raise ValueError(
-                f"Unsupported attention type: {self.config.attention_type}")
+                f"Unsupported attention type: {config.attention_type}")
 
         if expert_num == 1:
             self.mlp = MiniMaxText01MLP(
