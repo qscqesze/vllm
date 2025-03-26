@@ -665,14 +665,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
         self.layernorm_mlp_beta = getattr(config, 'layernorm_mlp_beta', 1)
         self.postnorm = getattr(config, 'postnorm', False)
         self.shared_moe = False
-
-        # shared_intermediate = getattr(config, 'shared_intermediate_size', 0)
-        # if isinstance(shared_intermediate, list):
-        #     self.shared_intermediate = shared_intermediate
-        # else:
-        #     if shared_intermediate > 0:
-        #         self.shared_intermediate = shared_intermediate
-        # return
+        return
 
     def forward(
             self,
