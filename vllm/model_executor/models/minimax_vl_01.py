@@ -966,13 +966,24 @@ class MiniMaxVL01Model(nn.Module):
 class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     """MiniMaxText01 model with multimodal capabilities."""
     
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: Optional[CacheConfig] = None,
+        scheduler_config=None,
+        prefix: str = "",
+    ) -> None:
+        # 首先调用父类的初始化方法
+        super().__init__(
+            config=config,
+            quant_config=quant_config,
+            cache_config=cache_config,
+            scheduler_config=scheduler_config,
+            prefix=prefix
+        )
         
         # 初始化多模态组件
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        
         # 初始化视觉塔和投影器
         self.vision_tower = init_vision_tower_for_llava(
             config,
@@ -985,6 +996,20 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             text_hidden_size=config.hidden_size,
             projector_hidden_act=config.projector_hidden_act,
             multimodal_projector_bias=config.multimodal_projector_bias)
+        
+        # 保存配置
+        self.config = config
+    
+    @classmethod
+    def from_vllm_config(cls, vllm_config: VllmConfig, prefix: str = ""):
+        """从vllm_config创建模型实例的工厂方法"""
+        return cls(
+            config=vllm_config.model_config.hf_config,
+            quant_config=vllm_config.quant_config,
+            cache_config=vllm_config.cache_config,
+            scheduler_config=vllm_config.scheduler_config,
+            prefix=prefix
+        )
     
     def get_multimodal_embeddings(self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         # 使用LlavaForConditionalGeneration的实现
