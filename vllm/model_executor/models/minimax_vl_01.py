@@ -602,6 +602,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
 
         head_dim = getattr(config, "head_dim",
                            config.hidden_size // config.num_attention_heads)
+        max_position_embeddings = config.max_position_embeddings
         if hasattr(config, "max_model_len") and isinstance(
                 config.max_model_len, int):
             max_position_embeddings = min(config.max_position_embeddings,
@@ -889,7 +890,8 @@ class MiniMaxVL01Model(nn.Module):
                                         dtype=torch.long)
             minimax_cache_tensors[:, slots_tensor, ...] = 0
 
-    def forward(self,
+    def forward(
+                self,
                 input_ids: Optional[torch.Tensor],
                 positions: torch.Tensor,
                 kv_caches: List[torch.Tensor],
@@ -984,12 +986,22 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         )
         
         # 初始化多模态组件
+        # 确保vision_config存在
+        if not hasattr(config, "vision_config"):
+            raise ValueError("模型配置中缺少vision_config，无法初始化视觉模块")
+            
         # 初始化视觉塔和投影器
         self.vision_tower = init_vision_tower_for_llava(
             config,
             quant_config,
             require_post_norm=False,
             prefix=maybe_prefix(prefix, "vision_tower"))
+            
+        # 确保必要的配置属性存在
+        if not hasattr(config, "projector_hidden_act"):
+            config.projector_hidden_act = "gelu"
+        if not hasattr(config, "multimodal_projector_bias"):
+            config.multimodal_projector_bias = True
             
         self.multi_modal_projector = LlavaMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
@@ -1056,11 +1068,20 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return super().compute_logits(hidden_states, sampling_metadata)
+        # 需要实现这个方法，而不是调用父类的方法
+        # 因为MiniMaxVL01Model没有实现compute_logits
+        if get_pp_group().is_last_rank:
+            logits_processor = LogitsProcessor(self.vocab_size)
+            return logits_processor(hidden_states)
+        return None
     
     def sample(
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        return super().sample(logits, sampling_metadata)
+        # 需要实现这个方法，而不是调用父类的方法
+        if get_pp_group().is_last_rank:
+            sampler = Sampler()
+            return sampler(logits, sampling_metadata)
+        return None
