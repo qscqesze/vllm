@@ -1043,48 +1043,6 @@ class AbabForCausalLM(nn.Module, SupportsMultiModal):
         # 保存配置
         self.config = config
     
-    def load_weights(self, weights):
-        """处理各种可能的权重路径格式"""
-        from vllm.model_executor.models.utils import AutoWeightLoader
-        
-        # 将生成器转换为列表，以便可以多次迭代
-        weights_list = list(weights)
-        
-        # 定义可能的前缀映射规则
-        prefix_mappings = {
-            'language_model.model.': 'model.',
-            'model.': 'model.',
-            'language_model.lm_head.': 'lm_head.',
-        }
-        
-        # 保持不变的模块
-        preserve_modules = ['vision_tower.', 'multi_modal_projector.']
-        
-        # 应用映射规则
-        mapped_weights = []
-        for name, tensor in weights_list:
-            # 检查是否是需要保持不变的模块
-            if any(name.startswith(module) for module in preserve_modules):
-                mapped_weights.append((name, tensor))
-                continue
-            
-            # 应用前缀替换规则
-            new_name = name
-            for prefix, replacement in prefix_mappings.items():
-                if name.startswith(prefix):
-                    new_name = replacement + name[len(prefix):]
-                    break
-                
-            mapped_weights.append((new_name, tensor))
-        
-        # 使用AutoWeightLoader加载权重
-        loader = AutoWeightLoader(self)
-        return loader.load_weights(mapped_weights)
-    
-    def make_empty_intermediate_tensors(self) -> IntermediateTensors:
-        """创建空的中间张量对象，用于模型并行处理"""
-        return self.model.make_empty_intermediate_tensors()
-    
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig, prefix: str = ""):
         """从vllm_config创建模型实例的工厂方法"""
@@ -1180,3 +1138,41 @@ class AbabForCausalLM(nn.Module, SupportsMultiModal):
             sampler = Sampler()
             return sampler(logits, sampling_metadata)
         return None
+        
+    def load_weights(self, weights):
+        """处理各种可能的权重路径格式"""
+        from vllm.model_executor.models.utils import AutoWeightLoader
+        
+        # 将生成器转换为列表，以便可以多次迭代
+        weights_list = list(weights)
+        
+        # 定义可能的前缀映射规则
+        prefix_mappings = {
+            'language_model.model.': 'model.',
+            'model.': 'model.',
+            'language_model.lm_head.': 'lm_head.',
+        }
+        
+        # 保持不变的模块
+        preserve_modules = ['vision_tower.', 'multi_modal_projector.']
+        
+        # 应用映射规则
+        mapped_weights = []
+        for name, tensor in weights_list:
+            # 检查是否是需要保持不变的模块
+            if any(name.startswith(module) for module in preserve_modules):
+                mapped_weights.append((name, tensor))
+                continue
+            
+            # 应用前缀替换规则
+            new_name = name
+            for prefix, replacement in prefix_mappings.items():
+                if name.startswith(prefix):
+                    new_name = replacement + name[len(prefix):]
+                    break
+                
+            mapped_weights.append((new_name, tensor))
+        
+        # 使用AutoWeightLoader加载权重
+        loader = AutoWeightLoader(self)
+        return loader.load_weights(mapped_weights)
