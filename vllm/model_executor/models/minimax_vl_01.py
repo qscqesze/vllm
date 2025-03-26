@@ -544,7 +544,7 @@ class MiniMaxImageEmbeddingInputs(TypedDict):
 MiniMaxImageInputs = Union[MiniMaxImagePixelInputs, MiniMaxImageEmbeddingInputs]
 
 
-class AbabForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+class MiniMaxVL01ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -726,3 +726,6 @@ class AbabForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                                                    torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+# 将 AbabForCausalLM 设置为 MiniMaxVL01ForCausalLM 的别名
+AbabForCausalLM = MiniMaxVL01ForCausalLM
