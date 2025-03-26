@@ -211,11 +211,11 @@ class VocabParallelEmbedding(torch.nn.Module):
         self.num_embeddings = num_embeddings
         self.padding_size = padding_size
         self.org_vocab_size = org_num_embeddings or num_embeddings
-        num_added_embeddings = num_embeddings - self.org_vocab_size
+        num_added_embeddings = max(0, num_embeddings - self.org_vocab_size)
         self.org_vocab_size_padded = pad_vocab_size(self.org_vocab_size,
                                                     self.padding_size)
         self.num_embeddings_padded = pad_vocab_size(
-            self.org_vocab_size_padded + num_added_embeddings,
+            max(self.org_vocab_size_padded, self.org_vocab_size_padded + num_added_embeddings),
             self.padding_size)
         assert self.org_vocab_size_padded <= self.num_embeddings_padded
 
