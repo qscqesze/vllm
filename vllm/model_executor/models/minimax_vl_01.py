@@ -975,7 +975,7 @@ class MiniMaxVL01Model(nn.Module):
 @MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor,
                                        info=LlavaProcessingInfo,
                                        dummy_inputs=LlavaDummyInputsBuilder)
-class MiniMaxVL01ForCausalLM(nn.Module, SupportsMultiModal):
+class AbabForCausalLM(nn.Module, SupportsMultiModal):
     """MiniMaxText01 model with multimodal capabilities."""
     
     def __init__(
@@ -1182,11 +1182,3 @@ class MiniMaxVL01ForCausalLM(nn.Module, SupportsMultiModal):
     def make_empty_intermediate_tensors(self):
         """创建空的中间张量"""
         return self.model.make_empty_intermediate_tensors()
-
-# 注册 MiniMaxVL01ForCausalLM 模型
-ModelRegistry.register_model_class(
-    "MiniMaxVL01ForCausalLM",
-    MiniMaxVL01ForCausalLM,
-    ["MiniMaxVL01ForCausalLM", "AbabForCausalLM"],  # 添加 AbabForCausalLM 作为别名
-    supports_multimodal=True,
-)
