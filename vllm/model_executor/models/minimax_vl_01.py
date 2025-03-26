@@ -1140,8 +1140,29 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
                 mapped_weights.append((name, tensor))
                 continue
             
+            # 处理MoE专家层的权重映射
+            if 'block_sparse_moe.experts' in name:
+                # 检查模型中是否存在对应的MoE层
+                layer_match = re.match(r'(layers\.\d+)\.block_sparse_moe\.experts', name)
+                if layer_match:
+                    layer_prefix = layer_match.group(1)
+                    layer_idx = int(layer_prefix.split('.')[-1])
+                    # 检查该层是否实际使用MoE
+                    if hasattr(self, 'layers') and layer_idx < len(self.layers):
+                        layer = self.layers[layer_idx]
+                        if hasattr(layer, 'block_sparse_moe'):
+                            mapped_weights.append((name, tensor))
+                        else:
+                            # 如果该层不使用MoE，则跳过这个权重
+                            continue
+                    else:
+                        # 如果层索引超出范围，跳过
+                        continue
+                else:
+                    # 如果不匹配预期的模式，保留原始名称
+                    mapped_weights.append((name, tensor))
             # 处理语言模型权重
-            if name.startswith('language_model.model.'):
+            elif name.startswith('language_model.model.'):
                 # 移除 'language_model.model.' 前缀
                 new_name = name[len('language_model.model.'):]
                 mapped_weights.append((new_name, tensor))
@@ -1158,9 +1179,6 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
                 mapped_weights.append((name, tensor))
         
         # 使用默认的权重加载器加载映射后的权重
-        from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-        # 不要直接将self传递给default_weight_loader
-        # 而是使用AutoWeightsLoader来处理权重加载
         from vllm.model_executor.models.utils import AutoWeightsLoader
         loader = AutoWeightsLoader(self)
         return loader.load_weights(mapped_weights)
