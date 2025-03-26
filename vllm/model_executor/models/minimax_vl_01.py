@@ -993,7 +993,6 @@ class MiniMaxVL01ForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         )
         
         # 初始化多模态组件
-        # 检查是否有视觉配置，如果没有则创建一个空的视觉塔和投影器
         self.has_vision_tower = hasattr(config, "vision_config")
         
         if self.has_vision_tower:
@@ -1031,7 +1030,7 @@ class MiniMaxVL01ForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             
             self.lm_head = ParallelLMHead(
                 config.hidden_size,
-                padded_vocab_size,  # 使用填充后的词汇表大小
+                padded_vocab_size,
                 org_num_embeddings=vocab_size,
                 bias=False,
                 padding_size=DEFAULT_VOCAB_PADDING_SIZE,
@@ -1041,6 +1040,27 @@ class MiniMaxVL01ForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         
         # 保存配置
         self.config = config
+    
+    # 添加权重加载方法，处理模型结构与权重路径不匹配的问题
+    def load_weights(self, weights):
+        """自定义权重加载方法，处理模型结构与权重路径不匹配的问题"""
+        from vllm.model_executor.models.utils import WeightLoader
+        
+        # 创建权重加载器
+        loader = WeightLoader(self)
+        
+        # 处理权重路径映射
+        # 如果权重中包含'language_model.model'前缀，需要移除它
+        processed_weights = {}
+        for name, tensor in weights.items():
+            if name.startswith('language_model.model.'):
+                new_name = name.replace('language_model.model.', '')
+                processed_weights[new_name] = tensor
+            else:
+                processed_weights[name] = tensor
+        
+        # 加载处理后的权重
+        return loader.load_weights(processed_weights)
     
     def make_empty_intermediate_tensors(self) -> IntermediateTensors:
         """创建空的中间张量对象，用于模型并行处理"""
