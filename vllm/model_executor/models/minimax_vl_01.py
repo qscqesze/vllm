@@ -1179,6 +1179,5 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
                 mapped_weights.append((name, tensor))
         
         # 使用默认的权重加载器加载映射后的权重
-        from vllm.model_executor.models.utils import AutoWeightsLoader
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(mapped_weights)
+        default_weight_loader(self, mapped_weights)
+        return mapped_weights
