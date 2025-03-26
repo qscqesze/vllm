@@ -761,6 +761,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
         return
 
 
+OPEN_DEBUG = True
 class MiniMaxVL01Model(nn.Module):
 
     def __init__(
@@ -968,7 +969,6 @@ class MiniMaxVL01Model(nn.Module):
 
         return hidden_states
 
-
 @MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor,
                                        info=LlavaProcessingInfo,
                                        dummy_inputs=LlavaDummyInputsBuilder)
@@ -1128,12 +1128,304 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             return sampler(logits, sampling_metadata)
         return None
 
-    def load_weights(self, weights):
-        skip_prefixes = [
-            "action_embed", "temporal_embed", "track_embed",
-            "track_embed_decoder", "box_token", "cg_criterion", "cg_model",
-            "loc_encoder", "loc_decoder", "sam", "temporal_token",
-            "track_token"
-        ]
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights)
+    def load_weights(self,
+                     weights: Iterable[Tuple[str, torch.Tensor]]) -> None:
+        if OPEN_DEBUG:
+            print(f"{AbabForCausalLM.__name__}. load_weights")
+
+        # parameter process
+        params_dict = dict(self.named_parameters())
+        # process and print
+        if True:
+            print(f"{AbabForCausalLM.__name__}.<===============>")
+            print(f"{AbabForCausalLM.__name__}.now .. loop named_parameters. ")
+            for name, param in self.named_parameters():
+                param_shape = None
+                if param is not None and hasattr(param, "data") and hasattr(param.data, "shape"):
+                    param_shape = param.data.shape
+                print(f"{AbabForCausalLM.__name__}.param.name = {name}, param.shape = {param_shape}")
+
+        # load every weights
+        if OPEN_DEBUG:
+            print(f"{AbabForCausalLM.__name__}.<===============>")
+
+        def which_layer(name: str) -> int:
+            if "layers" in name:
+                after_layer = name.split("layers")[-1]
+                return int(after_layer.split(".")[1])
+            return None
+
+        def is_linear_attn_layer(layer_idx: int) -> bool:
+            if layer_idx is None or not hasattr(self.config, "attn_type_list"):
+                return False
+            return self.config.attn_type_list[layer_idx] == 0
+
+        def is_moe_weight(name: str) -> bool:
+            if "block_sparse_moe" in name:
+                if name.endswith(".bias"):
+                    return False
+                return True
+            return False
+
+        def load_sparse_moe_weight(name: str, loaded_weight: torch.Tensor) -> None:
+            # model.layers.26.block_sparse_moe.experts.13.w1.weight, shape = torch.Size([4096, 4096])
+            # model.layers.26.block_sparse_moe.experts.13.w2.weight, shape = torch.Size([4096, 4096])
+            # model.layers.26.block_sparse_moe.experts.13.w3.weight, shape = torch.Size([4096, 4096])
+            if isinstance(self.config.num_local_experts, list):
+                if OPEN_DEBUG:
+                    print(f"{AbabForCausalLM.__name__}.[MOE] experts number not same, num_local_experts={self.config.num_local_experts}")
+                expert_params_mapping = [
+                    # (param_name, weight_name, expert_id)
+                    # ("ws" if weight_name in ["w1", "w3"] else "w2s",
+                    ("w13_weight" if weight_name in ["w1", "w3"] else "w2_weight",
+                     f"experts.{expert_id}.{weight_name}.weight", expert_id)
+                    for expert_id in range(max(self.config.num_local_experts))
+                    for weight_name in ["w1", "w2", "w3"]
+                ]
+            else:
+                if OPEN_DEBUG:
+                    print(f"{AbabForCausalLM.__name__}.[MOE] experts number not change accross layers, num_local_experts={self.config.num_local_experts}")
+                expert_params_mapping = [
+                    ("w13_scale" if weight_name in ["w1", "w3"] else "w2_scale",
+                    f"experts.{expert_id}.{weight_name}.weight_scale", expert_id)
+                    for expert_id in range(self.config.num_local_experts)
+                    for weight_name in ["w1", "w2", "w3"]
+                ] + [
+                    # (param_name, weight_name, expert_id)
+                    # # ("ws" if weight_name in ["w1", "w3"] else "w2s",
+                    ("w13_weight" if weight_name in ["w1", "w3"] else "w2_weight",
+                    f"experts.{expert_id}.{weight_name}.weight", expert_id)
+                    for expert_id in range(self.config.num_local_experts)
+                    for weight_name in ["w1", "w2", "w3"]
+                ]
+            for param_name, weight_name, expert_id in expert_params_mapping:
+                if weight_name not in name:
+                    continue
+                origin_name = name
+                name = name.replace(weight_name, param_name)
+                if OPEN_DEBUG:
+                    print(f"{AbabForCausalLM.__name__}.[MOE] load weights param_name = {param_name}, weight_name = {weight_name}, expert_id = {expert_id}")
+                    print(f"{AbabForCausalLM.__name__}.[MOE] name = {origin_name} -> {name}, weight_name = {weight_name}, param_name = {param_name}")
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                if OPEN_DEBUG:
+                    print(f"{AbabForCausalLM.__name__}.[MOE] param.shape = {param.data.shape}")
+                    print(f"{AbabForCausalLM.__name__}.[MOE] loaded_weight.shape = {loaded_weight.shape}")
+                    print(f"{AbabForCausalLM.__name__}.[MOE] weight_loader = {weight_loader}")
+                weight_loader = weight_loader_with_alias(name)(weight_loader)
+                weight_loader(param,
+                              loaded_weight,
+                              weight_name,
+                              expert_id=expert_id)
+                break
+            else:
+                if OPEN_DEBUG:
+                    print(f"{AbabForCausalLM.__name__}.[MOE] load weight name = {name}")
+                param = params_dict[name]
+                if OPEN_DEBUG:
+                    print(f"{AbabForCausalLM.__name__}.[MOE] param.shape = {param.data.shape}")
+                    print(f"{AbabForCausalLM.__name__}.[MOE] loaded_weight.shape = {loaded_weight.shape}")
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader = weight_loader_with_alias(name)(weight_loader)
+                if OPEN_DEBUG:
+                    print(f"{AbabForCausalLM.__name__}.[MOE] weight_loader = {weight_loader}")
+                weight_loader(param, loaded_weight)
+            return
+
+        def is_shared_mlp_weight(name: str) -> bool:
+            if "shared_mlp" in name:
+                if name.endswith(".bias"):
+                    return False
+                return True
+
+        def load_shared_mlp_weight(name: str, loaded_weight: torch.Tensor) -> None:
+            # AbabForCausalLM.param.name = model.layers.0.shared_mlp.gate_up_proj.weight, param.shape = torch.Size([512, 4096])
+            # AbabForCausalLM.param.name = model.layers.0.shared_mlp.down_proj.weight, param.shape = torch.Size([4096, 256])
+            if not self.CONCAT_FFN:
+                if "gate_proj" in name:
+                    name = name.replace("gate_proj", "w1", 1)
+                elif "up_proj" in name:
+                    name = name.replace("up_proj", "w3", 1)
+                elif "down_proj" in name:
+                    name = name.replace("down_proj", "w2", 1)
+            else:
+                if "gate_proj" in name:
+                    name = name.replace("gate_proj", "gate_up_proj", 1)
+                    loaded_shard_id = 0
+                elif "up_proj" in name:
+                    name = name.replace("up_proj", "gate_up_proj", 1)
+                    loaded_shard_id = 1
+            if OPEN_DEBUG:
+                print(f"{AbabForCausalLM.__name__}.[SHARED] load weights name = {name}")
+            param = params_dict[name]
+            if OPEN_DEBUG:
+                print(f"{AbabForCausalLM.__name__}.[SHARED] param.shape = {param.data.shape}")
+                print(f"{AbabForCausalLM.__name__}.[SHARED] loaded_weight.shape = {loaded_weight.shape}")
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader = weight_loader_with_alias(name)(weight_loader)
+            if OPEN_DEBUG:
+                print(f"{AbabForCausalLM.__name__}.[SHARED] weight_loader = {weight_loader}")
+            if not self.CONCAT_FFN:
+                weight_loader(param, loaded_weight)
+            else:
+                if "gate_up_proj" in name:
+                    weight_loader(param, loaded_weight, loaded_shard_id)
+                elif "down_proj" in name:
+                    weight_loader(param, loaded_weight)
+                else:
+                    assert False, "MLP weight not in [gate_up_proj, down_proj]"
+            return
+
+        def is_mha_weight(name: str) -> bool:
+            if "self_attn" in name:
+                if name.endswith(".bias"):
+                    return False
+                return True
+            return False
+
+        def load_linear_attn_weight(name: str, loaded_weight: torch.Tensor) -> None:
+            # model.layers.13.self_attn.norm.weight, shape = torch.Size([4096])
+            # model.layers.13.self_attn.out_proj.weight, shape = torch.Size([4096, 4096])
+            # model.layers.13.self_attn.output_gate.weight, shape = torch.Size([4096, 4096])
+            # model.layers.13.self_attn.qkv_proj.weight, shape = torch.Size([12288, 4096])
+            linear_mha_params_mapping = [
+                ("qkv_proj", "qkv_proj", 0),
+                ("output_gate", "output_gate", 0),
+                ("out_proj", "out_proj", 1),  # shard no use, cause out-proj and output-gate are not fuse.
+            ]
+            if OPEN_DEBUG:
+                print(f"{AbabForCausalLM.__name__}.[LINEAR] load weights name = {name}")
+            param = params_dict[name]
+            if OPEN_DEBUG:
+                print(f"{AbabForCausalLM.__name__}.[LINEAR] param.shape = {param.data.shape}")
+                print(f"{AbabForCausalLM.__name__}.[LINEAR] loaded_weight.shape = {loaded_weight.shape}")
+            weight_loader = getattr(param, "weight_loader",
+                                    AbabLinearAttentionNoTP.weight_direct_load)
+            weight_loader = weight_loader_with_alias(name)(weight_loader)
+            if OPEN_DEBUG:
+                print(f"{AbabForCausalLM.__name__}.[LINEAR] weight_loader = {weight_loader}")
+            weight_loader(param, loaded_weight)
+            return
+
+        def load_flash_attn_weight(name: str, loaded_weight: torch.Tensor) -> None:
+            # model.layers.15.self_attn.k_proj.weight, shape = torch.Size([4096, 4096])
+            # model.layers.15.self_attn.o_proj.weight, shape = torch.Size([4096, 4096])
+            # model.layers.15.self_attn.q_proj.weight, shape = torch.Size([4096, 4096])
+            # model.layers.15.self_attn.v_proj.weight, shape = torch.Size([4096, 4096])
+            flash_mha_params_mapping = [
+                # (param_name, weight_name, shard_id)
+                ("qkv_proj", "q_proj", "q"),
+                ("qkv_proj", "k_proj", "k"),
+                ("qkv_proj", "v_proj", "v"),
+                ("gate_up_proj", "gate_proj", 0),
+                ("gate_up_proj", "up_proj", 1),
+            ]
+            for (param_name, weight_name, shard_id) in flash_mha_params_mapping:
+                if weight_name not in name:
+                    continue
+                origin_name = name
+                name = name.replace(weight_name, param_name)
+                if OPEN_DEBUG:
+                    print(f"{AbabForCausalLM.__name__}.[FLASH] load weights param_name = {param_name}, weight_name = {weight_name}, shard_id = {shard_id}")
+                    print(f"{AbabForCausalLM.__name__}.[FLASH] name = {origin_name} -> {name}, weight_name = {weight_name}, param_name = {param_name}")
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = weight_loader_with_alias(name)(weight_loader)
+                if OPEN_DEBUG:
+                    print(f"{AbabForCausalLM.__name__}.[FLASH] param.shape = {param.data.shape}")
+                    print(f"{AbabForCausalLM.__name__}.[FLASH] loaded_weight.shape = {loaded_weight.shape}")
+                    print(f"{AbabForCausalLM.__name__}.[FLASH] weight_loader = {weight_loader}")
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                if OPEN_DEBUG:
+                    print(f"{AbabForCausalLM.__name__}.[FLASH] load weight name = {name}")
+                param = params_dict[name]
+                if OPEN_DEBUG:
+                    print(f"{AbabForCausalLM.__name__}.[FLASH] param.shape = {param.data.shape}")
+                    print(f"{AbabForCausalLM.__name__}.[FLASH] loaded_weight.shape = {loaded_weight.shape}")
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader = weight_loader_with_alias(name)(weight_loader)
+                if OPEN_DEBUG:
+                    print(f"{AbabForCausalLM.__name__}.[FLASH] weight_loader = {weight_loader}")
+                weight_loader(param, loaded_weight)
+            return
+
+        def is_layer_norm_weight(name: str) -> bool:
+            if "norm" in name:
+                if name.endswith(".bias") or name not in params_dict:
+                    return False
+                return True
+            return False
+
+        def load_layer_norm_weight(name: str, loaded_weight: torch.Tensor) -> None:
+            # model.layers.21.input_layernorm.weight, shape = torch.Size([4096])
+            # model.layers.21.post_attention_layernorm.weight, shape = torch.Size([4096])
+            if OPEN_DEBUG:
+                print(f"{AbabForCausalLM.__name__}.[NORM] load weight name = {name}")
+            param = params_dict[name]
+            if OPEN_DEBUG:
+                print(f"{AbabForCausalLM.__name__}.[NORM] param.shape = {param.data.shape}")
+                print(f"{AbabForCausalLM.__name__}.[NORM] loaded_weight.shape = {loaded_weight.shape}")
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader = weight_loader_with_alias(name)(weight_loader)
+            if OPEN_DEBUG:
+                print(f"{AbabForCausalLM.__name__}.[NORM] weight_loader = {weight_loader}")
+            weight_loader(param, loaded_weight)
+            return
+
+        def load_basic_weight(name: str, loaded_weight: torch.Tensor) -> None:
+            if OPEN_DEBUG:
+                print(f"{AbabForCausalLM.__name__}.[BASIC] load weight name = {name}")
+            param = params_dict[name]
+            if OPEN_DEBUG:
+                print(f"{AbabForCausalLM.__name__}.[BASIC] param.shape = {param.data.shape}")
+                print(f"{AbabForCausalLM.__name__}.[BASIC] loaded_weight.shape = {loaded_weight.shape}")
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader = weight_loader_with_alias(name)(weight_loader)
+            if OPEN_DEBUG:
+                print(f"{AbabForCausalLM.__name__}.[BASIC] weight_loader = {weight_loader}")
+            weight_loader(param, loaded_weight)
+            return
+
+        if OPEN_DEBUG:
+            print(f"{AbabForCausalLM.__name__}.now .. loop weights and load")
+        for name, loaded_weight in weights:
+            weight_at_layer = which_layer(name)
+            layer_attn_type = "linear" if is_linear_attn_layer(weight_at_layer) else "flash"
+            if OPEN_DEBUG:
+                print(f"{AbabForCausalLM.__name__}.----------------- layer = {weight_at_layer} | {layer_attn_type} -----------------")
+                print(f"{AbabForCausalLM.__name__}.loaded hf-weight = {name}, shape = {loaded_weight.shape if loaded_weight is not None else None}")
+
+            if is_layer_norm_weight(name):
+                load_layer_norm_weight(name, loaded_weight)
+                continue
+            if is_mha_weight(name):
+                if is_linear_attn_layer(weight_at_layer):
+                    load_linear_attn_weight(name, loaded_weight)
+                else:
+                    load_flash_attn_weight(name, loaded_weight)
+                continue
+            if is_moe_weight(name):
+                load_sparse_moe_weight(name, loaded_weight)
+                continue
+            if is_shared_mlp_weight(name):
+                load_shared_mlp_weight(name, loaded_weight)
+                continue
+
+            if "rotary_emb.inv_freq" in name:
+                if OPEN_DEBUG:
+                    print(f"{AbabForCausalLM.__name__}.[ROTARY] inverse frequency, skip load")
+                continue
+
+            load_basic_weight(name, loaded_weight)
+
+        if OPEN_DEBUG:
+            print(f"{AbabForCausalLM.__name__}.load_weights ends.")
+        return
+
