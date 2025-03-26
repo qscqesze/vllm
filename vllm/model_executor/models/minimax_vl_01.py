@@ -27,6 +27,7 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
                     merge_multimodal_embeddings)
+from .minimax_text_01 import MiniMaxText01ForCausalLM
 
 # Cannot find the following 2 numbers from hf config.
 _IMAGE_TOKEN_ID = 71011
@@ -250,7 +251,7 @@ class AbabForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             quant_config=quant_config,
             gather_output=True,
         )
-        self.language_model = PersimmonForCausalLM(
+        self.language_model = MiniMaxText01ForCausalLM(
             vllm_config=vllm_config.with_hf_config(config.text_config),
             prefix=maybe_prefix(prefix, "language_model"),
         )
