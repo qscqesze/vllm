@@ -1023,9 +1023,16 @@ class MiniMaxVL01ForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         
         # 添加LM头
         if get_pp_group().is_last_rank:
+            # 计算填充后的词汇表大小
+            tp_size = get_tensor_model_parallel_world_size()
+            vocab_size = self.vocab_size
+            padded_vocab_size = (
+                (vocab_size + tp_size - 1) // tp_size * tp_size
+            )
+            
             self.lm_head = ParallelLMHead(
                 config.hidden_size,
-                self.vocab_size,
+                padded_vocab_size,  # 使用填充后的词汇表大小
                 org_num_embeddings=self.vocab_size,
                 bias=False,
             )
