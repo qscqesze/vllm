@@ -38,7 +38,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding,
     pad_vocab_size)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import maybe_prefix, AutoWeightLoader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.model_executor.models.interfaces import SupportsMultiModal
@@ -1043,7 +1043,7 @@ class MiniMaxVL01ForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     
     def load_weights(self, weights):
         """处理各种可能的权重路径格式"""
-        from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+        from vllm.model_executor.models.utils import AutoWeightLoader
         
         # 将生成器转换为列表，以便可以多次迭代
         weights_list = list(weights)
@@ -1075,8 +1075,9 @@ class MiniMaxVL01ForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
                 
             mapped_weights.append((new_name, tensor))
         
-        # 使用默认的权重加载器加载映射后的权重
-        return default_weight_loader(self, mapped_weights)
+        # 使用AutoWeightLoader加载权重
+        loader = AutoWeightLoader(self)
+        return loader.load_weights(mapped_weights)
     
     def make_empty_intermediate_tensors(self) -> IntermediateTensors:
         """创建空的中间张量对象，用于模型并行处理"""
