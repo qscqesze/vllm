@@ -1024,6 +1024,13 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         # 保存配置
         self.config = config
     
+    def make_empty_intermediate_tensors(self) -> IntermediateTensors:
+        """创建空的中间张量对象，用于模型并行处理"""
+        return IntermediateTensors({
+            "hidden_states": None,
+            "residual": None
+        })
+    
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig, prefix: str = ""):
         """从vllm_config创建模型实例的工厂方法"""
