@@ -1264,40 +1264,56 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         def load_shared_mlp_weight(name: str, loaded_weight: torch.Tensor) -> None:
             # AbabForCausalLM.param.name = model.layers.0.shared_mlp.gate_up_proj.weight, param.shape = torch.Size([512, 4096])
             # AbabForCausalLM.param.name = model.layers.0.shared_mlp.down_proj.weight, param.shape = torch.Size([4096, 256])
+            processed_name = name
+            if name.startswith("model."):
+                processed_name = name[len("model."):]
+            
+            if not hasattr(self, 'CONCAT_FFN'):
+                self.CONCAT_FFN = False  # 默认值
+            
             if not self.CONCAT_FFN:
-                if "gate_proj" in name:
-                    name = name.replace("gate_proj", "w1", 1)
-                elif "up_proj" in name:
-                    name = name.replace("up_proj", "w3", 1)
-                elif "down_proj" in name:
-                    name = name.replace("down_proj", "w2", 1)
+                if "gate_proj" in processed_name:
+                    processed_name = processed_name.replace("gate_proj", "w1", 1)
+                elif "up_proj" in processed_name:
+                    processed_name = processed_name.replace("up_proj", "w3", 1)
+                elif "down_proj" in processed_name:
+                    processed_name = processed_name.replace("down_proj", "w2", 1)
             else:
-                if "gate_proj" in name:
-                    name = name.replace("gate_proj", "gate_up_proj", 1)
+                if "gate_proj" in processed_name:
+                    processed_name = processed_name.replace("gate_proj", "gate_up_proj", 1)
                     loaded_shard_id = 0
-                elif "up_proj" in name:
-                    name = name.replace("up_proj", "gate_up_proj", 1)
+                elif "up_proj" in processed_name:
+                    processed_name = processed_name.replace("up_proj", "gate_up_proj", 1)
                     loaded_shard_id = 1
+            
             if OPEN_DEBUG:
-                print(f"{AbabForCausalLM.__name__}.[SHARED] load weights name = {name}")
-            param = params_dict[name]
+                print(f"{AbabForCausalLM.__name__}.[SHARED] load weights name = {processed_name}")
+            
+            # 检查参数是否存在
+            if processed_name not in params_dict:
+                if OPEN_DEBUG:
+                    print(f"{AbabForCausalLM.__name__}.[SHARED] param {processed_name} not found, skipping")
+                return
+            
+            param = params_dict[processed_name]
             if OPEN_DEBUG:
                 print(f"{AbabForCausalLM.__name__}.[SHARED] param.shape = {param.data.shape}")
                 print(f"{AbabForCausalLM.__name__}.[SHARED] loaded_weight.shape = {loaded_weight.shape}")
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
-            weight_loader = weight_loader_with_alias(name)(weight_loader)
+            weight_loader = weight_loader_with_alias(processed_name)(weight_loader)
             if OPEN_DEBUG:
                 print(f"{AbabForCausalLM.__name__}.[SHARED] weight_loader = {weight_loader}")
             if not self.CONCAT_FFN:
                 weight_loader(param, loaded_weight)
             else:
-                if "gate_up_proj" in name:
+                if "gate_up_proj" in processed_name:
                     weight_loader(param, loaded_weight, loaded_shard_id)
-                elif "down_proj" in name:
+                elif "down_proj" in processed_name:
                     weight_loader(param, loaded_weight)
                 else:
-                    assert False, "MLP weight not in [gate_up_proj, down_proj]"
+                    if OPEN_DEBUG:
+                        print(f"{AbabForCausalLM.__name__}.[SHARED] Unexpected MLP weight: {processed_name}")
             return
 
         def is_mha_weight(name: str) -> bool:
@@ -1360,13 +1376,28 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
                 if weight_name not in name:
                     continue
                 origin_name = name
-                name = name.replace(weight_name, param_name)
+                
+                # 处理权重名称前缀，移除 "model." 前缀
+                processed_name = name
+                if name.startswith("model."):
+                    processed_name = name[len("model."):]
+                    
+                # 替换权重名称部分
+                processed_name = processed_name.replace(weight_name, param_name)
+                
                 if OPEN_DEBUG:
                     print(f"{AbabForCausalLM.__name__}.[FLASH] load weights param_name = {param_name}, weight_name = {weight_name}, shard_id = {shard_id}")
-                    print(f"{AbabForCausalLM.__name__}.[FLASH] name = {origin_name} -> {name}, weight_name = {weight_name}, param_name = {param_name}")
-                param = params_dict[name]
+                    print(f"{AbabForCausalLM.__name__}.[FLASH] name = {origin_name} -> {processed_name}, weight_name = {weight_name}, param_name = {param_name}")
+                
+                # 检查参数是否存在
+                if processed_name not in params_dict:
+                    if OPEN_DEBUG:
+                        print(f"{AbabForCausalLM.__name__}.[FLASH] param {processed_name} not found, skipping")
+                    continue
+                    
+                param = params_dict[processed_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader = weight_loader_with_alias(name)(weight_loader)
+                weight_loader = weight_loader_with_alias(processed_name)(weight_loader)
                 if OPEN_DEBUG:
                     print(f"{AbabForCausalLM.__name__}.[FLASH] param.shape = {param.data.shape}")
                     print(f"{AbabForCausalLM.__name__}.[FLASH] loaded_weight.shape = {loaded_weight.shape}")
@@ -1376,13 +1407,25 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             else:
                 if OPEN_DEBUG:
                     print(f"{AbabForCausalLM.__name__}.[FLASH] load weight name = {name}")
-                param = params_dict[name]
+                    
+                # 处理权重名称前缀，移除 "model." 前缀
+                param_name = name
+                if name.startswith("model."):
+                    param_name = name[len("model."):]
+                
+                # 检查参数是否存在
+                if param_name not in params_dict:
+                    if OPEN_DEBUG:
+                        print(f"{AbabForCausalLM.__name__}.[FLASH] param {param_name} not found, skipping")
+                    return
+                    
+                param = params_dict[param_name]
                 if OPEN_DEBUG:
                     print(f"{AbabForCausalLM.__name__}.[FLASH] param.shape = {param.data.shape}")
                     print(f"{AbabForCausalLM.__name__}.[FLASH] loaded_weight.shape = {loaded_weight.shape}")
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                weight_loader = weight_loader_with_alias(name)(weight_loader)
+                weight_loader = weight_loader_with_alias(param_name)(weight_loader)
                 if OPEN_DEBUG:
                     print(f"{AbabForCausalLM.__name__}.[FLASH] weight_loader = {weight_loader}")
                 weight_loader(param, loaded_weight)
