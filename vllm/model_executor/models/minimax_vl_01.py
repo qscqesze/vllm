@@ -60,6 +60,8 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
 
+from vllm.model_executor.models.registry import ModelRegistry
+
 def replace_weight_name(name: str,
                         key: str = None,
                         to: str = None,
@@ -1180,3 +1182,12 @@ class AbabForCausalLM(nn.Module, SupportsMultiModal):
     def make_empty_intermediate_tensors(self):
         """创建空的中间张量"""
         return self.model.make_empty_intermediate_tensors()
+
+# 在文件末尾添加模型注册
+from vllm.model_executor.models.registry import ModelRegistry
+
+# 直接注册 AbabForCausalLM 模型
+ModelRegistry.register_model_class(
+    "AbabForCausalLM",
+    AbabForCausalLM
+)

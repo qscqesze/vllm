@@ -245,7 +245,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-vl2-tiny",  # noqa: E501
                                                hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]}),  # noqa: E501
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
-    "AbabForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-VL-01"),
     "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it",
                                                       min_transformers_version="4.50"),
     "GLM4VForCausalLM": _HfExamplesInfo("THUDM/glm-4v-9b",
