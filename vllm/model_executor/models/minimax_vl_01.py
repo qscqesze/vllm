@@ -666,27 +666,13 @@ class MiniMaxText01DecoderLayer(nn.Module):
         self.postnorm = getattr(config, 'postnorm', False)
         self.shared_moe = False
 
-        shared_intermediate = getattr(config, 'shared_intermediate_size', 0)
-        if shared_intermediate > 0:
-            self.shared_moe = True
-            self.shared_mlp = MiniMaxText01MLP(
-                hidden_size=self.hidden_size,
-                intermediate_size=shared_intermediate,
-                quant_config=quant_config,
-                layer_idx=self._ilayer,
-                prefix=prefix)
-            self.coefficient = ReplicatedLinear(
-                self.hidden_size,
-                1,
-                bias=False,
-                quant_config=quant_config,
-                params_dtype=torch.float32,
-            )
-            self.coefficient.weight.weight_loader = (
-                self.shared_moe_coefficient_loader)
-            self.shared_moe_mode = getattr(config, 'shared_moe_mode',
-                                           'softmax')
-        return
+        # shared_intermediate = getattr(config, 'shared_intermediate_size', 0)
+        # if isinstance(shared_intermediate, list):
+        #     self.shared_intermediate = shared_intermediate
+        # else:
+        #     if shared_intermediate > 0:
+        #         self.shared_intermediate = shared_intermediate
+        # return
 
     def forward(
             self,
