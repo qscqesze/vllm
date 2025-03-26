@@ -983,6 +983,7 @@ class AbabForCausalLM(nn.Module, SupportsMultiModal):
         vllm_config=None,
         prefix: str = "",
     ) -> None:
+        print("AbabForCausalLM init")
         super().__init__()
         
         config = vllm_config.model_config.hf_config
