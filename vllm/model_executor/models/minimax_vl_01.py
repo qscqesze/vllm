@@ -761,7 +761,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
         return
 
 
-OPEN_DEBUG = True
+OPEN_DEBUG = False
 class MiniMaxVL01Model(nn.Module):
 
     def __init__(
