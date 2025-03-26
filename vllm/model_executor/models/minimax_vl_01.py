@@ -56,6 +56,7 @@ from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
                     LlavaMultiModalProjector, init_vision_tower_for_llava)
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from vllm.model_executor.layers.sampler import SamplerOutput
+from .utils import AutoWeightsLoader
 
 def replace_weight_name(name: str,
                         key: str = None,
@@ -1128,53 +1129,11 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         return None
 
     def load_weights(self, weights):
-        """处理各种可能的权重路径格式"""
-        # 将生成器转换为列表，以便可以多次迭代
-        weights_list = list(weights)
-        
-        # 创建一个新的权重列表，应用必要的名称映射
-        mapped_weights = []
-        for name, tensor in weights_list:
-            # 处理视觉塔和多模态投影器的权重
-            if name.startswith('vision_tower.') or name.startswith('multi_modal_projector.'):
-                mapped_weights.append((name, tensor))
-                continue
-            
-            # 处理MoE专家层的权重映射
-            if 'block_sparse_moe.experts' in name:
-                # 检查模型中是否存在对应的MoE层
-                layer_match = re.match(r'(layers\.\d+)\.block_sparse_moe\.experts', name)
-                if layer_match:
-                    layer_prefix = layer_match.group(1)
-                    layer_idx = int(layer_prefix.split('.')[-1])
-                    # 检查该层是否实际使用MoE
-                    if hasattr(self, 'layers') and layer_idx < len(self.layers):
-                        layer = self.layers[layer_idx]
-                        if hasattr(layer, 'block_sparse_moe'):
-                            mapped_weights.append((name, tensor))
-                        else:
-                            # 如果该层不使用MoE，则跳过这个权重
-                            continue
-                    else:
-                        # 如果层索引超出范围，跳过
-                        continue
-                else:
-                    # 如果不匹配预期的模式，保留原始名称
-                    mapped_weights.append((name, tensor))
-            # 处理语言模型权重
-            elif name.startswith('language_model.'):
-                # 移除 'language_model.' 前缀
-                new_name = name[len('language_model.'):]
-                mapped_weights.append((new_name, tensor))
-            elif name.startswith('model.'):
-                # 移除 'model.' 前缀
-                new_name = name[len('model.'):]
-                mapped_weights.append((new_name, tensor))
-            else:
-                # 保持其他权重不变
-                mapped_weights.append((name, tensor))
-        
-        # 使用默认的权重加载器加载映射后的权重
-        from vllm.model_executor.models.utils import AutoWeightsLoader
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(mapped_weights)
+        skip_prefixes = [
+            "action_embed", "temporal_embed", "track_embed",
+            "track_embed_decoder", "box_token", "cg_criterion", "cg_model",
+            "loc_encoder", "loc_decoder", "sam", "temporal_token",
+            "track_token"
+        ]
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        return loader.load_weights(weights)
