@@ -1481,6 +1481,32 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             if name.startswith("model."):
                 param_name = name[len("model."):]
             
+            # 特殊处理词汇嵌入权重
+            if "embed_tokens.weight" in param_name or "lm_head.weight" in param_name:
+                if OPEN_DEBUG:
+                    print(f"{AbabForCausalLM.__name__}.[BASIC] 特殊处理词汇嵌入权重: {param_name}")
+                
+                # 检查参数是否存在
+                if param_name not in params_dict:
+                    if OPEN_DEBUG:
+                        print(f"{AbabForCausalLM.__name__}.[BASIC] param {param_name} not found, skipping")
+                    return
+                    
+                param = params_dict[param_name]
+                if OPEN_DEBUG:
+                    print(f"{AbabForCausalLM.__name__}.[BASIC] param.shape = {param.data.shape}")
+                    print(f"{AbabForCausalLM.__name__}.[BASIC] loaded_weight.shape = {loaded_weight.shape}")
+                
+                # 使用自定义加载方法处理词汇嵌入权重
+                if param.data.shape[0] != loaded_weight.shape[0]:
+                    if OPEN_DEBUG:
+                        print(f"{AbabForCausalLM.__name__}.[BASIC] 词汇嵌入尺寸不匹配，进行特殊处理")
+                    
+                    # 确保我们只复制有效的部分
+                    min_vocab_size = min(param.data.shape[0], loaded_weight.shape[0])
+                    param.data[:min_vocab_size].copy_(loaded_weight[:min_vocab_size])
+                    return
+            
             # 尝试获取参数，如果不存在则记录并跳过
             if param_name not in params_dict:
                 if OPEN_DEBUG:
