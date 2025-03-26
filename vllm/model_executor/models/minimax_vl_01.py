@@ -46,7 +46,16 @@ from .interfaces import HasInnerState, IsHybrid
 from .minimax_cache import MinimaxCacheManager, MinimaxCacheParams
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.model_executor.models.llava import LlavaDummyInputsBuilder,_build_llava_or_pixtral_hf_processor, _build_llava_or_pixtral_hf_info
+from vllm.model_executor.models.llava import (
+    LlavaProcessingInfo, LlavaMultiModalProcessor, LlavaDummyInputsBuilder,
+    _build_llava_or_pixtral_hf_processor, _build_llava_or_pixtral_hf_info
+)
+from .llava import init_vision_tower_for_llava
+from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
+                    LlavaDummyInputsBuilder, LlavaLikeConfig,
+                    LlavaMultiModalProjector, init_vision_tower_for_llava)
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
+from vllm.model_executor.layers.sampler import SamplerOutput
 
 def replace_weight_name(name: str,
                         key: str = None,
@@ -949,322 +958,84 @@ class MiniMaxVL01Model(nn.Module):
             hidden_states = self.norm(hidden_states)
 
         return hidden_states
+
+
+@MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor,
+                                       info=LlavaProcessingInfo,
+                                       dummy_inputs=LlavaDummyInputsBuilder)
+class MiniMaxVL01ForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
+    """MiniMaxText01 model with multimodal capabilities."""
     
-
-@MULTIMODAL_REGISTRY.register_processor(_build_llava_or_pixtral_hf_processor,
-                                        info=_build_llava_or_pixtral_hf_info,
-                                        dummy_inputs=LlavaDummyInputsBuilder)
-class AbabForCausalLM(nn.Module, SupportsMultiModal):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-
-        super().__init__()
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        
+        # 初始化多模态组件
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
-        self.config = config
-        self.lora_config = lora_config
-
-        if not hasattr(config, "sliding_window"):
-            config.sliding_window = None
-
-        self.CONCAT_FFN = True
-
-        self.unpadded_vocab_size = self.config.vocab_size
-        if hasattr(vllm_config.model_config, "max_model_len"):
-            self.config.max_model_len = vllm_config.model_config.max_model_len
-        self.model = MiniMaxVL01Model(
-            self.config,
+        
+        # 初始化视觉塔和投影器
+        self.vision_tower = init_vision_tower_for_llava(
+            config,
             quant_config,
-            cache_config=vllm_config.cache_config,
-            scheduler_config=vllm_config.scheduler_config,
-            prefix=maybe_prefix(prefix, "model"))
-        if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
-                self.config.hidden_size,
-                org_num_embeddings=self.config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
-            )
-
-            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                    self.config.vocab_size)
-
-            self.sampler = Sampler()
-        else:
-            self.lm_head = PPMissingLayer()
-
-        flash_layer_count = sum(1 for attn_type in self.config.attn_type_list
-                                if attn_type == 1)
-        self.kv_cache = [torch.tensor([]) for _ in range(flash_layer_count)]
-        return
-
-    def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
-        return self.model.minimax_cache.copy_inputs_before_cuda_graphs(
-            input_buffers, **kwargs)
-
-    def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
-        return self.model.minimax_cache.get_seqlen_agnostic_capture_inputs(
-            batch_size)
-
-    def forward(self,
-                input_ids: torch.Tensor,
-                positions: torch.Tensor,
-                intermediate_tensors: Optional[IntermediateTensors] = None,
-                inputs_embeds: Optional[torch.Tensor] = None,
-                **kwargs) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, self.kv_cache,
-                                   intermediate_tensors, inputs_embeds,
-                                   **kwargs)
-
-        return hidden_states
-
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
-
-        return logits
-
+            require_post_norm=False,
+            prefix=maybe_prefix(prefix, "vision_tower"))
+            
+        self.multi_modal_projector = LlavaMultiModalProjector(
+            vision_hidden_size=config.vision_config.hidden_size,
+            text_hidden_size=config.hidden_size,
+            projector_hidden_act=config.projector_hidden_act,
+            multimodal_projector_bias=config.multimodal_projector_bias)
+    
+    def get_multimodal_embeddings(self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+        # 使用LlavaForConditionalGeneration的实现
+        from vllm.model_executor.models.llava import LlavaForConditionalGeneration
+        dummy_llava = LlavaForConditionalGeneration.__new__(LlavaForConditionalGeneration)
+        dummy_llava.config = self.config
+        dummy_llava.vision_tower = self.vision_tower
+        dummy_llava.multi_modal_projector = self.multi_modal_projector
+        
+        return dummy_llava.get_multimodal_embeddings(**kwargs)
+    
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> torch.Tensor:
+        # 使用LlavaForConditionalGeneration的实现
+        from vllm.model_executor.models.llava import LlavaForConditionalGeneration
+        dummy_llava = LlavaForConditionalGeneration.__new__(LlavaForConditionalGeneration)
+        dummy_llava.config = self.config
+        dummy_llava.language_model = self
+        
+        return dummy_llava.get_input_embeddings(input_ids, multimodal_embeddings)
+    
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs: object,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        if intermediate_tensors is not None:
+            inputs_embeds = None
+        elif inputs_embeds is None:
+            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
+            input_ids = None
+            
+        return super().forward(input_ids, positions, intermediate_tensors, inputs_embeds)
+    
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        return super().compute_logits(hidden_states, sampling_metadata)
+    
     def sample(
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ):
-
-        next_tokens = self.sampler(logits, sampling_metadata)
-
-        return next_tokens
-
-    def make_empty_intermediate_tensors(
-            self, batch_size: int, dtype: torch.dtype,
-            device: torch.device) -> IntermediateTensors:
-        return IntermediateTensors({
-            "hidden_states":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
-            "residual":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
-        })
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> None:
-        params_dict = dict(self.named_parameters())
-
-        def which_layer(name: str) -> int:
-            if "layers" in name:
-                after_layer = name.split("layers")[-1]
-                return int(after_layer.split(".")[1])
-            return None
-
-        def is_linear_attn_layer(layer_idx: int) -> bool:
-            if layer_idx is None or not hasattr(self.config, "attn_type_list"):
-                return False
-            return self.config.attn_type_list[layer_idx] == 0
-
-        def is_moe_weight(name: str) -> bool:
-            return "block_sparse_moe" in name and not name.endswith(".bias")
-
-        def get_expert_id(param_name):
-            pattern = r'model\.layers\.\d+\.block_sparse_moe\.experts\.(\d+)\.'
-            match = re.search(pattern, param_name)
-            if match:
-                return match.group(1)
-            return None
-
-        def load_sparse_moe_weight(name: str, loaded_weight: torch.Tensor,
-                                   self) -> None:
-            if isinstance(self.config.num_local_experts, list):
-                expert_params_mapping = [
-                    ("w13_weight"
-                     if weight_name in ["w1", "w3"] else "w2_weight",
-                     f"experts.{expert_id}.{weight_name}.weight", expert_id)
-                    for expert_id in range(max(self.config.num_local_experts))
-                    for weight_name in ["w1", "w2", "w3"]
-                ]
-            else:
-                expert_params_mapping = [
-                    ("w13_scale" if weight_name in ["w1", "w3"] else
-                     "w2_scale", f"{expert_id}.{weight_name}.weight_scale",
-                     expert_id, weight_name)
-                    for expert_id in range(self.config.num_local_experts)
-                    for weight_name in ["w1", "w2", "w3"]
-                ] + [("w13_weight" if weight_name in ["w1", "w3"] else
-                      "w2_weight", f"{expert_id}.{weight_name}.weight",
-                      expert_id, weight_name)
-                     for expert_id in range(self.config.num_local_experts)
-                     for weight_name in ["w1", "w2", "w3"]]
-            for (param_name, weight_name, expert_id,
-                 shard_id) in expert_params_mapping:
-                name_expert_id = get_expert_id(name)
-                if name_expert_id is not None and int(name_expert_id) != int(
-                        expert_id):
-                    continue
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                if is_pp_missing_parameter(name, self):
-                    return
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader = weight_loader_with_alias(name)(weight_loader)
-                weight_loader(param,
-                              loaded_weight,
-                              weight_name,
-                              expert_id=expert_id,
-                              shard_id=shard_id)
-                break
-            else:
-                if is_pp_missing_parameter(name, self):
-                    return
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader = weight_loader_with_alias(name)(weight_loader)
-                weight_loader(param, loaded_weight)
-            return
-
-        def is_shared_mlp_weight(name: str) -> bool:
-            return "shared_mlp" in name and not name.endswith(".bias")
-
-        def load_shared_mlp_weight(name: str, loaded_weight: torch.Tensor,
-                                   self) -> None:
-            if not self.CONCAT_FFN:
-                if "gate_proj" in name:
-                    name = name.replace("gate_proj", "w1", 1)
-                elif "up_proj" in name:
-                    name = name.replace("up_proj", "w3", 1)
-                elif "down_proj" in name:
-                    name = name.replace("down_proj", "w2", 1)
-            else:
-                if "gate_proj" in name:
-                    name = name.replace("gate_proj", "gate_up_proj", 1)
-                    loaded_shard_id = 0
-                elif "up_proj" in name:
-                    name = name.replace("up_proj", "gate_up_proj", 1)
-                    loaded_shard_id = 1
-            if is_pp_missing_parameter(name, self):
-                return
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader = weight_loader_with_alias(name)(weight_loader)
-            if not self.CONCAT_FFN:
-                weight_loader(param, loaded_weight)
-            else:
-                if "gate_up_proj" in name:
-                    weight_loader(param, loaded_weight, loaded_shard_id)
-                elif "down_proj" in name:
-                    weight_loader(param, loaded_weight)
-                else:
-                    raise AssertionError(
-                        "MLP weight not in [gate_up_proj, down_proj]")
-            return
-
-        def is_mha_weight(name: str) -> bool:
-            return "self_attn" in name and not name.endswith(".bias")
-
-        def load_linear_attn_weight(name: str, loaded_weight: torch.Tensor,
-                                    self) -> None:
-            if is_pp_missing_parameter(name, self):
-                return
-            param = params_dict[name]
-
-            weight_loader = getattr(
-                param, "weight_loader",
-                MiniMaxText01LinearAttention.weight_direct_load)
-            weight_loader = weight_loader_with_alias(name)(weight_loader)
-            weight_loader(param, loaded_weight)
-            return
-
-        def load_flash_attn_weight(name: str, loaded_weight: torch.Tensor,
-                                   self) -> None:
-
-            flash_mha_params_mapping = [
-                # (param_name, weight_name, shard_id)
-                ("qkv_proj", "q_proj", "q"),
-                ("qkv_proj", "k_proj", "k"),
-                ("qkv_proj", "v_proj", "v"),
-                ("gate_up_proj", "gate_proj", 0),
-                ("gate_up_proj", "up_proj", 1),
-            ]
-            for (param_name, weight_name,
-                 shard_id) in flash_mha_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                if is_pp_missing_parameter(name, self):
-                    return
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader = weight_loader_with_alias(name)(weight_loader)
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                if is_pp_missing_parameter(name, self):
-                    return
-                param = params_dict[name]
-
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader = weight_loader_with_alias(name)(weight_loader)
-                weight_loader(param, loaded_weight)
-            return
-
-        def is_layer_norm_weight(name: str) -> bool:
-            return "norm" in name and not name.endswith(
-                ".bias") and name in params_dict
-
-        def load_layer_norm_weight(name: str, loaded_weight: torch.Tensor,
-                                   self) -> None:
-            if is_pp_missing_parameter(name, self):
-                return
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader = weight_loader_with_alias(name)(weight_loader)
-            weight_loader(param, loaded_weight)
-            return
-
-        def load_basic_weight(name: str, loaded_weight: torch.Tensor,
-                              self) -> None:
-            if is_pp_missing_parameter(name, self):
-                return
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader = weight_loader_with_alias(name)(weight_loader)
-            weight_loader(param, loaded_weight)
-            return
-
-        for name, loaded_weight in weights:
-            weight_at_layer = which_layer(name)
-            if weight_at_layer and weight_at_layer >= len(
-                    self.config.attn_type_list):
-                continue
-
-            if is_layer_norm_weight(name):
-                load_layer_norm_weight(name, loaded_weight, self)
-                continue
-            if is_mha_weight(name):
-                if is_linear_attn_layer(weight_at_layer):
-                    load_linear_attn_weight(name, loaded_weight, self)
-                else:
-                    load_flash_attn_weight(name, loaded_weight, self)
-                continue
-            if is_moe_weight(name):
-                load_sparse_moe_weight(name, loaded_weight, self)
-                continue
-            if is_shared_mlp_weight(name):
-                load_shared_mlp_weight(name, loaded_weight, self)
-                continue
-
-            if "rotary_emb.inv_freq" in name:
-                continue
-
-            load_basic_weight(name, loaded_weight, self)
-        return
+    ) -> Optional[SamplerOutput]:
+        return super().sample(logits, sampling_metadata)
