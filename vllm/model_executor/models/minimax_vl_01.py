@@ -992,28 +992,28 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         )
         
         # 初始化多模态组件
-        # 确保vision_config存在
-        if not hasattr(config, "vision_config"):
-            raise ValueError("模型配置中缺少vision_config，无法初始化视觉模块")
-            
-        # 初始化视觉塔和投影器
-        self.vision_tower = init_vision_tower_for_llava(
-            config,
-            quant_config,
-            require_post_norm=False,
-            prefix=maybe_prefix(prefix, "vision_tower"))
-            
-        # 确保必要的配置属性存在
-        if not hasattr(config, "projector_hidden_act"):
-            config.projector_hidden_act = "gelu"
-        if not hasattr(config, "multimodal_projector_bias"):
-            config.multimodal_projector_bias = True
-            
-        self.multi_modal_projector = LlavaMultiModalProjector(
-            vision_hidden_size=config.vision_config.hidden_size,
-            text_hidden_size=config.hidden_size,
-            projector_hidden_act=config.projector_hidden_act,
-            multimodal_projector_bias=config.multimodal_projector_bias)
+        # 检查是否有视觉配置，如果没有则跳过视觉模块初始化
+        self.has_vision_tower = hasattr(config, "vision_config")
+        
+        if self.has_vision_tower:
+            # 初始化视觉塔和投影器
+            self.vision_tower = init_vision_tower_for_llava(
+                config,
+                quant_config,
+                require_post_norm=False,
+                prefix=maybe_prefix(prefix, "vision_tower"))
+                
+            # 确保必要的配置属性存在
+            if not hasattr(config, "projector_hidden_act"):
+                config.projector_hidden_act = "gelu"
+            if not hasattr(config, "multimodal_projector_bias"):
+                config.multimodal_projector_bias = True
+                
+            self.multi_modal_projector = LlavaMultiModalProjector(
+                vision_hidden_size=config.vision_config.hidden_size,
+                text_hidden_size=config.hidden_size,
+                projector_hidden_act=config.projector_hidden_act,
+                multimodal_projector_bias=config.multimodal_projector_bias)
         
         # 保存配置
         self.config = config
@@ -1041,6 +1041,10 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         )
     
     def get_multimodal_embeddings(self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+        # 如果没有视觉塔，返回None
+        if not self.has_vision_tower:
+            return None
+            
         # 使用LlavaForConditionalGeneration的实现
         from vllm.model_executor.models.llava import LlavaForConditionalGeneration
         dummy_llava = LlavaForConditionalGeneration.__new__(LlavaForConditionalGeneration)
@@ -1055,6 +1059,10 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
+        # 如果没有视觉塔，直接使用普通的嵌入
+        if not self.has_vision_tower:
+            return self.embed_scale * self.embed_tokens(input_ids)
+            
         # 使用LlavaForConditionalGeneration的实现
         from vllm.model_executor.models.llava import LlavaForConditionalGeneration
         dummy_llava = LlavaForConditionalGeneration.__new__(LlavaForConditionalGeneration)
@@ -1075,9 +1083,11 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         if intermediate_tensors is not None:
             inputs_embeds = None
         elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
-            input_ids = None
+            # 只有在有视觉塔的情况下才获取多模态嵌入
+            if self.has_vision_tower:
+                vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+                inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
+                input_ids = None
             
         return super().forward(
             input_ids=input_ids, 
