@@ -1023,6 +1023,11 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         
         # 保存配置
         self.config = config
+        
+        # 添加 language_model 属性，指向自身
+        # 这是为了与其他多模态模型保持一致的接口
+        self.language_model = self
+        self.model = self  # 添加model属性，指向自身
     
     def make_empty_intermediate_tensors(self) -> IntermediateTensors:
         """创建空的中间张量对象，用于模型并行处理"""
