@@ -847,10 +847,14 @@ class MiniMaxVL01Model(nn.Module):
         rope_theta = getattr(config, "rope_theta", 10000)
         head_dim = getattr(config, "head_dim",
                            config.hidden_size // config.num_attention_heads)
+        
+        # 修复：确保max_position_embeddings变量正确定义
+        max_position_embeddings = config.max_position_embeddings
         if hasattr(config, "max_model_len") and isinstance(
                 config.max_model_len, int):
             max_position_embeddings = min(config.max_position_embeddings,
                                           config.max_model_len)
+                                          
         self.rotary_emb = MiniMaxText01RotaryEmbedding(
             head_dim,
             rotary_dim=config.rotary_dim
