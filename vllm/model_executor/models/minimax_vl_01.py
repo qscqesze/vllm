@@ -971,7 +971,7 @@ class MiniMaxVL01Model(nn.Module):
 @MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor,
                                        info=LlavaProcessingInfo,
                                        dummy_inputs=LlavaDummyInputsBuilder)
-class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
+class MiniMaxVL01ForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     """MiniMaxText01 model with multimodal capabilities."""
     
     def __init__(
@@ -1010,16 +1010,27 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
                 config.multimodal_projector_bias = True
                 
             # 初始化多模态投影器
-            from vllm.model_executor.models.llava import LlavaMultiModalProjector
             self.multi_modal_projector = LlavaMultiModalProjector(
                 vision_hidden_size=config.vision_config.hidden_size,
                 text_hidden_size=config.hidden_size,
                 projector_hidden_act=config.projector_hidden_act,
-                multimodal_projector_bias=config.multimodal_projector_bias)
+                multimodal_projector_bias=config.multimodal_projector_bias,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"))
         else:
             # 创建空的视觉塔和投影器
             self.vision_tower = None
             self.multi_modal_projector = None
+        
+        # 添加LM头
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.hidden_size,
+                self.vocab_size,
+                org_num_embeddings=self.vocab_size,
+                bias=False,
+            )
+        else:
+            self.lm_head = PPMissingLayer()
         
         # 保存配置
         self.config = config
@@ -1047,7 +1058,7 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         if not self.has_vision_tower:
             return None
             
-        # 修复：直接实现多模态嵌入的获取，而不是依赖LlavaForConditionalGeneration
+        # 处理图像输入
         if "images" not in kwargs:
             return None
             
@@ -1077,7 +1088,7 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         if not self.has_vision_tower or multimodal_embeddings is None:
             return self.embed_scale * self.embed_tokens(input_ids)
             
-        # 修复：直接实现输入嵌入的获取，而不是依赖LlavaForConditionalGeneration
+        # 获取文本嵌入
         text_embeddings = self.embed_scale * self.embed_tokens(input_ids)
         
         # 如果有图像位置信息，则在指定位置插入图像特征
@@ -1098,7 +1109,7 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        # 修复：确保正确处理多模态输入
+        # 处理多模态输入
         if intermediate_tensors is not None:
             inputs_embeds = None
         elif inputs_embeds is None and self.has_vision_tower:
@@ -1106,11 +1117,9 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
             if vision_embeddings is not None:
                 inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
-            else:
-                inputs_embeds = self.get_input_embeddings(input_ids, None)
-            
+        
         # 调用父类的forward方法
-        return super().forward(
+        hidden_states = super().forward(
             input_ids=input_ids,
             positions=positions,
             kv_caches=kv_caches,
@@ -1118,17 +1127,17 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             inputs_embeds=inputs_embeds,
             **kwargs
         )
+        
+        return hidden_states
     
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        # 需要实现这个方法，而不是调用父类的方法
-        # 因为MiniMaxVL01Model没有实现compute_logits
+        """计算logits"""
         if get_pp_group().is_last_rank:
-            logits_processor = LogitsProcessor(self.vocab_size)
-            return logits_processor(hidden_states)
+            return self.lm_head(hidden_states)
         return None
     
     def sample(
@@ -1136,8 +1145,11 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        # 需要实现这个方法，而不是调用父类的方法
+        """采样生成token"""
         if get_pp_group().is_last_rank:
             sampler = Sampler()
             return sampler(logits, sampling_metadata)
         return None
+
+# 为了向后兼容，保留原始类名作为别名
+AbabForCausalLM = MiniMaxVL01ForCausalLM
