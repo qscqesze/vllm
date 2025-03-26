@@ -972,7 +972,7 @@ class MiniMaxVL01Model(nn.Module):
 @MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor,
                                        info=LlavaProcessingInfo,
                                        dummy_inputs=LlavaDummyInputsBuilder)
-class AbabForCausalLM(nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP):
+class AbabForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     """MiniMaxText01 model with multimodal capabilities."""
     
     def __init__(
