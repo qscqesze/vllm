@@ -40,11 +40,13 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
+from vllm.model_executor.models.interfaces import SupportsMultiModal
 
 from .interfaces import HasInnerState, IsHybrid
 from .minimax_cache import MinimaxCacheManager, MinimaxCacheParams
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
-
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.model_executor.models.llava import LlavaDummyInputsBuilder,_build_llava_or_pixtral_hf_processor, _build_llava_or_pixtral_hf_info
 
 def replace_weight_name(name: str,
                         key: str = None,
@@ -746,7 +748,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
         return
 
 
-class MiniMaxText01Model(nn.Module):
+class MiniMaxVL01Model(nn.Module):
 
     def __init__(
         self,
@@ -947,9 +949,12 @@ class MiniMaxText01Model(nn.Module):
             hidden_states = self.norm(hidden_states)
 
         return hidden_states
+    
 
-
-class AbabForCausalLM(nn.Module, HasInnerState, IsHybrid):
+@MULTIMODAL_REGISTRY.register_processor(_build_llava_or_pixtral_hf_processor,
+                                        info=_build_llava_or_pixtral_hf_info,
+                                        dummy_inputs=LlavaDummyInputsBuilder)
+class AbabForCausalLM(nn.Module, SupportsMultiModal):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
 
@@ -968,7 +973,7 @@ class AbabForCausalLM(nn.Module, HasInnerState, IsHybrid):
         self.unpadded_vocab_size = self.config.vocab_size
         if hasattr(vllm_config.model_config, "max_model_len"):
             self.config.max_model_len = vllm_config.model_config.max_model_len
-        self.model = MiniMaxText01Model(
+        self.model = MiniMaxVL01Model(
             self.config,
             quant_config,
             cache_config=vllm_config.cache_config,
