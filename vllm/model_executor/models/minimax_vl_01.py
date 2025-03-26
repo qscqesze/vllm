@@ -1176,3 +1176,7 @@ class AbabForCausalLM(nn.Module, SupportsMultiModal):
         # 使用AutoWeightLoader加载权重
         loader = AutoWeightLoader(self)
         return loader.load_weights(mapped_weights)
+        
+    def make_empty_intermediate_tensors(self):
+        """创建空的中间张量"""
+        return self.model.make_empty_intermediate_tensors()
