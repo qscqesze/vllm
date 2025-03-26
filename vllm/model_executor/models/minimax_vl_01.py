@@ -972,7 +972,7 @@ class MiniMaxVL01Model(nn.Module):
 @MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor,
                                        info=LlavaProcessingInfo,
                                        dummy_inputs=LlavaDummyInputsBuilder)
-class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
+class AbabForCausalLM(nn.Module, SupportsMultiModal):
     """MiniMaxText01 model with multimodal capabilities."""
     
     def __init__(
@@ -983,8 +983,10 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         scheduler_config=None,
         prefix: str = "",
     ) -> None:
-        # 首先调用父类的初始化方法
-        super().__init__(
+        super().__init__()
+        
+        # 创建语言模型
+        self.model = MiniMaxVL01Model(
             config=config,
             quant_config=quant_config,
             cache_config=cache_config,
@@ -1025,7 +1027,7 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         if get_pp_group().is_last_rank:
             # 计算填充后的词汇表大小
             tp_size = get_tensor_model_parallel_world_size()
-            vocab_size = self.vocab_size
+            vocab_size = config.vocab_size
             padded_vocab_size = pad_vocab_size(vocab_size, DEFAULT_VOCAB_PADDING_SIZE)
             
             self.lm_head = ParallelLMHead(
@@ -1050,8 +1052,8 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         
         # 定义可能的前缀映射规则
         prefix_mappings = {
-            'language_model.model.': '',
-            'model.': '',
+            'language_model.model.': 'model.',
+            'model.': 'model.',
             'language_model.lm_head.': 'lm_head.',
         }
         
@@ -1081,10 +1083,7 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     
     def make_empty_intermediate_tensors(self) -> IntermediateTensors:
         """创建空的中间张量对象，用于模型并行处理"""
-        return IntermediateTensors({
-            "hidden_states": None,
-            "residual": None
-        })
+        return self.model.make_empty_intermediate_tensors()
     
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig, prefix: str = ""):
@@ -1123,47 +1122,34 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             positions=kwargs.get("image_positions", None)
         )
     
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        # 如果没有多模态嵌入，则直接使用文本嵌入
-        if not self.has_vision_tower or multimodal_embeddings is None:
-            return self.embed_scale * self.embed_tokens(input_ids)
-            
-        # 获取文本嵌入
-        text_embeddings = self.embed_scale * self.embed_tokens(input_ids)
-        
-        # 如果有图像位置信息，则在指定位置插入图像特征
-        if multimodal_embeddings.positions is not None:
-            for i, (seq_idx, pos_idx) in enumerate(multimodal_embeddings.positions):
-                if i < len(multimodal_embeddings.embeddings):
-                    # 在指定位置插入图像特征
-                    text_embeddings[seq_idx, pos_idx] = multimodal_embeddings.embeddings[i]
-        
-        return text_embeddings
-    
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         # 处理多模态输入
-        if intermediate_tensors is not None:
-            inputs_embeds = None
-        elif inputs_embeds is None and self.has_vision_tower:
+        inputs_embeds = None
+        if intermediate_tensors is None and self.has_vision_tower:
             # 获取多模态嵌入
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            if vision_embeddings is not None:
-                inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
+            if vision_embeddings is not None and get_pp_group().is_first_rank:
+                # 获取文本嵌入
+                text_embeddings = self.model.embed_scale * self.model.embed_tokens(input_ids)
+                
+                # 如果有图像位置信息，则在指定位置插入图像特征
+                if vision_embeddings.positions is not None:
+                    for i, (seq_idx, pos_idx) in enumerate(vision_embeddings.positions):
+                        if i < len(vision_embeddings.embeddings):
+                            # 在指定位置插入图像特征
+                            text_embeddings[seq_idx, pos_idx] = vision_embeddings.embeddings[i]
+                
+                inputs_embeds = text_embeddings
         
-        # 调用父类的forward方法
-        hidden_states = super().forward(
+        # 调用语言模型的forward方法
+        hidden_states = self.model.forward(
             input_ids=input_ids,
             positions=positions,
             kv_caches=kv_caches,
