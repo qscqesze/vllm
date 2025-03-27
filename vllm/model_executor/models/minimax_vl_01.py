@@ -970,14 +970,110 @@ class MiniMaxVL01Model(nn.Module):
             hidden_states = self.norm(hidden_states)
 
         return hidden_states
+from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Set as AbstractSet
+from functools import lru_cache, partial
+from typing import Callable, List, Literal, Optional, TypedDict, Union
+import unicodedata
 
+@lru_cache(maxsize=1)
+def _get_tokenizer_without_image_pad(
+        tokenizer: PreTrainedTokenizer) -> PreTrainedTokenizer:
+    """
+    The logic of adding image pad tokens should only be applied in
+    :class:`QwenVLProcessor`, so they are patched out here.
+
+    The definition of the wrapped tokenizer can be found here:
+    https://huggingface.co/Qwen/Qwen-VL/blob/main/tokenization_qwen.py
+    """
+    new_tokenizer = copy.deepcopy(tokenizer)
+
+    class TokenizerWithoutImagePad(tokenizer.__class__):  # type: ignore
+
+        def tokenize(
+            self,
+            text: str,
+            allowed_special: Union[AbstractSet[str], str] = "all",
+            disallowed_special: Union[Collection[str], str] = (),
+            **kwargs,
+        ) -> list[Union[bytes, str]]:
+            text = unicodedata.normalize("NFC", text)
+
+            return [
+                self.decoder[t] for t in self.tokenizer.encode(
+                    text,
+                    allowed_special=allowed_special,
+                    disallowed_special=disallowed_special,
+                )
+            ]
+
+        def _decode(
+            self,
+            token_ids: Union[int, List[int]],
+            skip_special_tokens: bool = False,
+            errors: Optional[str] = None,
+            **kwargs,
+        ) -> str:
+            if isinstance(token_ids, int):
+                token_ids = [token_ids]
+
+            return self.tokenizer.decode(
+                token_ids,
+                errors=errors or self.errors,
+            )
+
+    TokenizerWithoutImagePad.__name__ = \
+        f"{tokenizer.__class__.__name__}WithoutImagePad"
+
+    new_tokenizer.__class__ = TokenizerWithoutImagePad
+    return new_tokenizer
+
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate, PromptUpdateDetails)
+from transformers import (BatchFeature, PretrainedConfig, PreTrainedTokenizer,
+                          TensorType)
+class MinimaxVLProcessingInfo(BaseProcessingInfo):
+    def get_tokenizer(self) -> PreTrainedTokenizer:
+        tokenizer = self.ctx.tokenizer
+        assert isinstance(tokenizer, PreTrainedTokenizer)
+
+        return _get_tokenizer_without_image_pad(tokenizer)
+
+    def get_hf_processor(self, **kwargs: object) -> LlavaMultiModalProcessor:
+        return self.ctx.init_processor(
+            LlavaMultiModalProcessor,
+            config=self.get_hf_config(),
+            tokenizer=self.get_tokenizer(),
+            **kwargs,
+        )
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None}
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        return {"image": self.get_num_image_tokens()}
+
+    def get_num_image_tokens(self) -> int:
+        hf_config = self.get_hf_config()
+        vision_config = hf_config.visual
+
+        image_size = vision_config["image_size"]
+        patch_size = vision_config["patch_size"]
+        grid_length = image_size // patch_size // 2
+        return grid_length * grid_length
+
+# 注册自定义处理器
 @MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor,
-                                       info=LlavaProcessingInfo,
+                                       info=MinimaxVLProcessingInfo,
                                        dummy_inputs=LlavaDummyInputsBuilder)
 class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     """MiniMaxText01 model with multimodal capabilities."""
     
-    # 添加一个类变量来指定正确的配置类型
     _mm_config_class = "LlavaConfig"
     
     def __init__(
