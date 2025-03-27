@@ -3,7 +3,7 @@
 import copy
 import math
 import re
-from typing import Dict, Iterable, List, Optional, Tuple, Union, Set, TypedDict, Literal
+from typing import Dict, Iterable, List, Optional, Tuple, Union, Set
 
 import torch
 import torch.distributed
@@ -59,12 +59,6 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from .utils import AutoWeightsLoader
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.multimodal.processing import (PlaceholderFeaturesInfo,
-                                        ProcessingCache, PromptIndexTargets,
-                                        PromptInsertion, PromptReplacement)
-from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
-                    is_pp_missing_parameter, maybe_prefix,
-                    merge_multimodal_embeddings)
 
 def replace_weight_name(name: str,
                         key: str = None,
@@ -977,183 +971,14 @@ class MiniMaxVL01Model(nn.Module):
 
         return hidden_states
 
-# 创建自定义的处理信息类和处理器
-class MinimaxVLImagePixelInputs(TypedDict):
-    """MiniMax VL图像像素输入"""
-    type: Literal["pixel_values"]
-    data: torch.Tensor
-    """
-    Shape: `(batch_size * num_images, 3, height, width)`
-    图像像素值
-    """
-
-
-class MinimaxVLImageEmbeddingInputs(TypedDict):
-    """MiniMax VL图像嵌入输入"""
-    type: Literal["image_embeds"]
-    data: torch.Tensor
-    """
-    Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
-    预计算的图像嵌入
-    """
-
-
-MinimaxVLImageInputs = Union[MinimaxVLImagePixelInputs, MinimaxVLImageEmbeddingInputs]
-
-
-class MinimaxVLProcessingInfo:
-    """为Minimax模型定制的多模态处理信息类"""
-    
-    def __init__(self, ctx):
-        self.ctx = ctx
-    
-    def get_hf_config(self):
-        """获取HF配置，直接返回，不进行类型检查"""
-        return self.ctx.model_config.hf_config
-    
-    def get_tokenizer(self):
-        """获取分词器"""
-        return self.ctx.get_tokenizer()
-    
-    def get_vision_encoder_info(self):
-        """获取视觉编码器信息"""
-        hf_config = self.get_hf_config()
-        if hasattr(hf_config, "vision_config"):
-            return hf_config.vision_config
-        return None
-    
-    def get_image_size_with_most_features(self):
-        """获取图像尺寸"""
-        hf_config = self.get_hf_config()
-        if hasattr(hf_config, "vision_config"):
-            image_size = getattr(hf_config.vision_config, "image_size", 336)
-        else:
-            image_size = 336  # 默认值
-        return image_size, image_size
-    
-    def get_max_image_tokens(self):
-        """获取最大图像标记数"""
-        width, height = self.get_image_size_with_most_features()
-        hf_config = self.get_hf_config()
-        if hasattr(hf_config, "vision_config"):
-            patch_size = getattr(hf_config.vision_config, "patch_size", 14)
-        else:
-            patch_size = 14  # 默认值
-        return (width // patch_size) * (height // patch_size)
-    
-    def get_mm_max_tokens_per_item(self, model_config):
-        """获取每个多模态项的最大标记数"""
-        return {"image": self.get_max_image_tokens()}
-    
-    def get_supported_mm_limits(self):
-        """获取支持的多模态限制"""
-        return {"image": None}  # None表示没有限制
-
-
-class MinimaxVLMultiModalProcessor:
-    """为Minimax模型定制的多模态处理器"""
-    
-    def __init__(self, ctx):
-        self.ctx = ctx
-        self.info = MinimaxVLProcessingInfo(ctx)
-    
-    def apply(self, prompt, mm_data, hf_processor_mm_kwargs, return_mm_hashes=False):
-        """应用多模态处理"""
-        # 获取分词器和配置
-        tokenizer = self.info.get_tokenizer()
-        hf_config = self.info.get_hf_config()
-        
-        # 获取图像标记ID
-        image_token_id = getattr(hf_config, "image_token_index", None)
-        if image_token_id is None:
-            # 尝试从分词器获取
-            image_token = "<image>"
-            if hasattr(tokenizer, "convert_tokens_to_ids"):
-                image_token_id = tokenizer.convert_tokens_to_ids(image_token)
-        
-        # 处理提示文本
-        if isinstance(prompt, str):
-            # 分词
-            prompt_token_ids = tokenizer.encode(prompt, return_tensors="pt")[0].tolist()
-        else:
-            prompt_token_ids = prompt
-        
-        # 处理图像
-        mm_kwargs = {}
-        if "image" in mm_data:
-            images = mm_data["image"]
-            if isinstance(images, list):
-                # 处理多个图像
-                processed_images = []
-                for img in images:
-                    processed_images.append(self._process_image(img))
-                mm_kwargs["images"] = processed_images
-            else:
-                # 处理单个图像
-                mm_kwargs["images"] = self._process_image(images)
-        
-        # 创建多模态输入
-        return {
-            "type": "multimodal",
-            "prompt": prompt,
-            "prompt_token_ids": prompt_token_ids,
-            "mm_kwargs": mm_kwargs,
-            "mm_placeholders": {"image": [(i, i+1) for i, token_id in enumerate(prompt_token_ids) if token_id == image_token_id]}
-        }
-    
-    def _process_image(self, image):
-        """处理图像"""
-        # 这里可以添加图像预处理逻辑，如调整大小、归一化等
-        return image
-    
-    def _get_prompt_updates(self, mm_items, hf_processor_mm_kwargs, out_mm_kwargs):
-        """获取提示更新"""
-        hf_config = self.info.get_hf_config()
-        image_token_id = getattr(hf_config, "image_token_index", None)
-        
-        # 创建图像标记替换
-        return [
-            PromptReplacement(
-                modality="image",
-                target=[image_token_id],
-                replacement=lambda item_idx: f"<image_{item_idx}>"
-            )
-        ]
-
-
-class MinimaxVLDummyInputsBuilder:
-    """为Minimax模型构建测试输入"""
-    
-    def __init__(self, ctx):
-        self.ctx = ctx
-    
-    def build_dummy_inputs(self, batch_size=1, seq_len=1):
-        """构建测试输入"""
-        import torch
-        
-        # 获取图像尺寸
-        info = MinimaxVLProcessingInfo(self.ctx)
-        width, height = info.get_image_size_with_most_features()
-        
-        # 创建虚拟图像
-        dummy_images = torch.zeros(batch_size, 3, height, width)
-        
-        return {
-            "images": dummy_images,
-            "positions": torch.zeros(batch_size, seq_len, dtype=torch.long),
-            "image_sizes": [(height, width)] * batch_size
-        }
-
-
-# 更新AbabForCausalLM类的实现
+@MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor,
+                                       info=LlavaProcessingInfo,
+                                       dummy_inputs=LlavaDummyInputsBuilder)
 class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     """MiniMaxText01 model with multimodal capabilities."""
     
-    # 移除配置类型限制
-    _mm_config_class = None
-    
-    # 添加模型类型标识
-    model_type = "minimax_vl_01"
+    # 添加一个类变量来指定正确的配置类型
+    _mm_config_class = "LlavaConfig"
     
     def __init__(
         self,
@@ -1175,196 +1000,249 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         self.quant_config = quant_config
         
         # 初始化多模态组件
+        # 检查是否有视觉配置，如果没有则跳过视觉模块初始化
         self.has_vision_tower = hasattr(config, "vision_config")
         
         if self.has_vision_tower:
-            # 初始化视觉塔
-            self.vision_tower = self._init_vision_tower(
+            # 初始化视觉塔和投影器
+            self.vision_tower = init_vision_tower_for_llava(
                 config,
                 quant_config,
+                require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_tower"))
                 
-            # 初始化多模态投影器
+            # 确保必要的配置属性存在
             if not hasattr(config, "projector_hidden_act"):
                 config.projector_hidden_act = "gelu"
             if not hasattr(config, "multimodal_projector_bias"):
                 config.multimodal_projector_bias = True
                 
-            self.multi_modal_projector = self._init_projector(
-                config,
-                quant_config,
+            self.multi_modal_projector = LlavaMultiModalProjector(
+                vision_hidden_size=config.vision_config.hidden_size,
+                text_hidden_size=config.hidden_size,
+                projector_hidden_act=config.projector_hidden_act,
+                multimodal_projector_bias=config.multimodal_projector_bias,
                 prefix=maybe_prefix(prefix, "multi_modal_projector"))
         
+        # 保存配置
         self.config = config
-    
-    def _init_vision_tower(self, config, quant_config, prefix=""):
-        """初始化视觉塔"""
-        # 这里可以根据配置选择不同的视觉模型
-        if hasattr(config.vision_config, "model_type") and config.vision_config.model_type == "clip":
-            from .clip import CLIPVisionModel
-            return CLIPVisionModel(config.vision_config, quant_config, prefix=prefix)
-        else:
-            # 默认使用通用视觉模型
-            from .vision import VisionModel
-            return VisionModel(config.vision_config, quant_config, prefix=prefix)
-    
-    def _init_projector(self, config, quant_config, prefix=""):
-        """初始化多模态投影器"""
-        # 创建一个简单的投影器
-        return nn.Sequential(
-            ColumnParallelLinear(
-                config.vision_config.hidden_size,
+        
+        # 初始化lm_head
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
                 config.hidden_size,
-                bias=config.multimodal_projector_bias,
-                quant_config=quant_config,
-                prefix=f"{prefix}.0"
-            ),
-            nn.GELU(),
-            RowParallelLinear(
-                config.hidden_size,
-                config.hidden_size,
-                bias=config.multimodal_projector_bias,
-                quant_config=quant_config,
-                prefix=f"{prefix}.2"
+                self.vocab_size,
+                org_num_embeddings=self.vocab_size,
+                bias=False,
             )
+        else:
+            self.lm_head = PPMissingLayer()
+        
+        # 为词汇嵌入和语言模型头设置自定义权重加载器
+        if get_pp_group().is_first_rank and hasattr(self, 'embed_tokens'):
+            self.embed_tokens.weight.weight_loader = self.embed_tokens_weight_loader
+            
+        if get_pp_group().is_last_rank and hasattr(self, 'lm_head'):
+            self.lm_head.weight.weight_loader = self.lm_head_weight_loader
+    
+    @staticmethod
+    def embed_tokens_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        """自定义的词汇嵌入权重加载器，处理词汇大小不匹配的情况"""
+        # 获取张量模型并行世界大小和排名
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        
+        # 检查维度兼容性
+        if param.dim() != loaded_weight.dim():
+            raise ValueError(f"Dimension mismatch: param dim {param.dim()}, loaded weight dim {loaded_weight.dim()}")
+        
+        # 检查隐藏维度是否匹配
+        if param.shape[-1] != loaded_weight.shape[-1]:
+            raise ValueError(f"Hidden size mismatch: param shape {param.shape}, loaded weight shape {loaded_weight.shape}")
+        
+        # 计算每个分片的大小
+        vocab_size = loaded_weight.shape[0]
+        shard_size = vocab_size // tp_size
+        
+        # 计算当前分片的范围
+        start_idx = tp_rank * shard_size
+        end_idx = min((tp_rank + 1) * shard_size, vocab_size)
+        
+        # 复制权重到参数
+        if start_idx < vocab_size:
+            # 确保我们只复制参数能容纳的部分
+            copy_size = min(end_idx - start_idx, param.shape[0])
+            param[:copy_size].data.copy_(loaded_weight[start_idx:start_idx + copy_size])
+    
+    @staticmethod
+    def lm_head_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        """自定义的语言模型头权重加载器，处理词汇大小不匹配的情况"""
+        # 获取张量模型并行世界大小和排名
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        
+        # 检查是否需要转置权重
+        if loaded_weight.shape[0] == param.shape[1] and loaded_weight.shape[1] == param.shape[0] * tp_size:
+            loaded_weight = loaded_weight.transpose(0, 1)
+        
+        # 计算每个分片的大小
+        vocab_size = loaded_weight.shape[0]
+        shard_size = vocab_size // tp_size
+        
+        # 计算当前分片的范围
+        start_idx = tp_rank * shard_size
+        end_idx = min((tp_rank + 1) * shard_size, vocab_size)
+        
+        # 复制权重到参数
+        if start_idx < vocab_size:
+            # 确保我们只复制参数能容纳的部分
+            copy_size = min(end_idx - start_idx, param.shape[0])
+            
+            # 处理隐藏维度不匹配的情况
+            if param.shape[1] != loaded_weight.shape[1]:
+                # 创建一个新的权重张量，大小与参数匹配
+                new_weight = torch.zeros(
+                    loaded_weight.shape[0], 
+                    param.shape[1],
+                    device=loaded_weight.device, 
+                    dtype=loaded_weight.dtype
+                )
+                
+                # 复制加载的权重到新权重的前部分
+                min_dim = min(param.shape[1], loaded_weight.shape[1])
+                new_weight[:, :min_dim] = loaded_weight[:, :min_dim]
+                
+                # 使用新权重进行复制
+                param[:copy_size].data.copy_(new_weight[start_idx:start_idx + copy_size])
+            else:
+                # 如果隐藏维度匹配，直接复制
+                param[:copy_size].data.copy_(loaded_weight[start_idx:start_idx + copy_size])
+
+    def make_empty_intermediate_tensors(self) -> IntermediateTensors:
+        """创建空的中间张量，用于模型并行处理。"""
+        return IntermediateTensors({
+            "hidden_states": None,
+            "residual": None
+        })
+    
+    @classmethod
+    def from_vllm_config(cls, vllm_config: VllmConfig, prefix: str = ""):
+        """从vllm_config创建模型实例的工厂方法"""
+        return cls(
+            config=vllm_config.model_config.hf_config,
+            quant_config=vllm_config.quant_config,
+            cache_config=vllm_config.cache_config,
+            scheduler_config=vllm_config.scheduler_config,
+            prefix=prefix
         )
     
-    def _validate_pixel_values(self, data):
-        """验证像素值"""
-        if not hasattr(self.config, "vision_config"):
-            return data
-            
-        h = w = self.config.vision_config.image_size
-        expected_dims = (3, h, w)
-        actual_dims = tuple(data.shape[1:])
-        
-        if actual_dims != expected_dims:
-            expected_expr = ("batch_size", *map(str, expected_dims))
-            raise ValueError(
-                f"The expected shape of pixel values is {expected_expr}. "
-                f"You supplied {tuple(data.shape)}.")
-        
-        return data
-    
-    def _parse_and_validate_image_input(self, **kwargs):
-        """解析并验证图像输入"""
-        pixel_values = kwargs.pop("pixel_values", None)
-        image_embeds = kwargs.pop("image_embeds", None)
-        
-        if pixel_values is not None:
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError(f"Incorrect type of pixel values. Got type: {type(pixel_values)}")
-            
-            return MinimaxVLImagePixelInputs(
-                type="pixel_values",
-                data=self._validate_pixel_values(flatten_bn(pixel_values, concat=True)),
-            )
-        
-        if image_embeds is not None:
-            if not isinstance(image_embeds, (torch.Tensor, list)):
-                raise ValueError(f"Incorrect type of image embeddings. Got type: {type(image_embeds)}")
-            
-            return MinimaxVLImageEmbeddingInputs(
-                type="image_embeds",
-                data=flatten_bn(image_embeds, concat=True),
-            )
-        
-        return None
-    
-    def _process_image_input(self, image_input):
-        """处理图像输入"""
-        if image_input["type"] == "image_embeds":
-            return image_input["data"]
-        
-        # 处理像素值
-        pixel_values = image_input["data"]
-        vision_outputs = self.vision_tower(pixel_values)
-        image_features = vision_outputs.last_hidden_state
-        
-        # 应用投影器
-        return self.multi_modal_projector(image_features)
-    
-    def get_multimodal_embeddings(self, **kwargs):
+    def get_multimodal_embeddings(self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         """获取多模态嵌入"""
+        # 如果没有视觉塔，返回None
         if not self.has_vision_tower:
             return None
+            
+        # 获取图像处理器和图像
+        processor = kwargs.get("processor")
+        images = kwargs.get("images")
         
-        image_input = self._parse_and_validate_image_input(**kwargs)
-        if image_input is None:
+        if processor is None or images is None:
             return None
+            
+        # 处理图像并获取视觉特征
+        vision_tower_output = self.vision_tower(images)
+        image_features = vision_tower_output.last_hidden_state
         
-        vision_embeddings = self._process_image_input(image_input)
-        return vision_embeddings
+        # 使用多模态投影器处理视觉特征
+        projected_features = self.multi_modal_projector(image_features)
+        
+        # 创建并返回多模态嵌入
+        return MultiModalEmbeddings(
+            embeddings=projected_features,
+            positions=kwargs.get("positions"),
+            image_sizes=kwargs.get("image_sizes")
+        )
     
-    def get_input_embeddings(self, input_ids, multimodal_embeddings=None):
-        """获取输入嵌入"""
-        inputs_embeds = self.embed_tokens(input_ids)
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> torch.Tensor:
+        """获取输入嵌入，包括文本和可能的视觉嵌入"""
+        # 如果没有多模态嵌入，直接使用普通的嵌入
+        if multimodal_embeddings is None:
+            return self.embed_scale * self.embed_tokens(input_ids)
+            
+        # 获取文本嵌入
+        text_embeddings = self.embed_scale * self.embed_tokens(input_ids)
         
-        if multimodal_embeddings is not None:
-            # 合并文本和视觉嵌入
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, 
-                inputs_embeds, 
-                multimodal_embeddings,
-                self.config.image_token_index
-            )
+        # 如果有多模态嵌入，将其与文本嵌入合并
+        # 找到图像标记的位置
+        image_token_positions = (input_ids == self.config.image_token_id).nonzero(as_tuple=True)[0]
         
-        return inputs_embeds
+        if len(image_token_positions) == 0:
+            # 没有图像标记，直接返回文本嵌入
+            return text_embeddings
+            
+        # 替换图像标记位置的嵌入
+        for i, pos in enumerate(image_token_positions):
+            if i < len(multimodal_embeddings.embeddings):
+                # 获取当前图像的嵌入
+                image_embedding = multimodal_embeddings.embeddings[i]
+                
+                # 替换文本嵌入中的图像标记
+                text_embeddings[pos:pos+1] = image_embedding
+                
+        return text_embeddings
     
-    def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None, **kwargs):
-        """前向传播"""
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs: object,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        """前向传播，处理输入并生成输出"""
         if intermediate_tensors is not None:
             inputs_embeds = None
         elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
-            input_ids = None
-        
-        hidden_states = super().forward(
-            input_ids=input_ids,
-            positions=positions,
-            intermediate_tensors=intermediate_tensors,
+            # 只有在有视觉塔的情况下才获取多模态嵌入
+            if self.has_vision_tower:
+                vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+                inputs_embeds = self.get_input_embeddings(input_ids, vision_embeddings)
+                input_ids = None
+            
+        return super().forward(
+            input_ids=input_ids, 
+            positions=positions, 
+            kv_caches=kv_caches,
+            intermediate_tensors=intermediate_tensors, 
             inputs_embeds=inputs_embeds,
             **kwargs
         )
-        
-        return hidden_states
     
-    # 添加缺失的方法
-    def make_empty_intermediate_tensors(self, batch_size: int, seq_len: int) -> IntermediateTensors:
-        """创建空的中间张量，用于并行处理"""
-        hidden_size = self.config.hidden_size
-        device = next(self.parameters()).device
-        dtype = next(self.parameters()).dtype
-        
-        # 创建空的隐藏状态和残差
-        hidden_states = torch.zeros(
-            (batch_size * seq_len, hidden_size),
-            device=device,
-            dtype=dtype
-        )
-        residual = None
-        
-        return IntermediateTensors({
-            "hidden_states": hidden_states,
-            "residual": residual
-        })
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        """计算logits"""
+        if get_pp_group().is_last_rank:
+            return self.lm_head(hidden_states)
+        return None
     
-    # 添加多模态处理器工厂方法
-    @classmethod
-    def get_multimodal_processor(cls, ctx):
-        """获取多模态处理器"""
-        return MinimaxVLMultiModalProcessor(ctx)
-    
-    @classmethod
-    def get_multimodal_processing_info(cls, ctx):
-        """获取多模态处理信息"""
-        return MinimaxVLProcessingInfo(ctx)
-    
-    @classmethod
-    def get_dummy_inputs_builder(cls, ctx):
-        """获取测试输入构建器"""
-        return MinimaxVLDummyInputsBuilder(ctx)
+    def sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        """采样生成下一个token"""
+        if get_pp_group().is_last_rank:
+            sampler = Sampler()
+            return sampler(logits, sampling_metadata)
+        return None
     
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         """自定义权重加载函数，处理权重路径映射问题"""
@@ -1470,23 +1348,3 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
                 raise
         
         return loaded_params
-    
-    # 添加模型类型识别方法
-    @staticmethod
-    def from_config(config, **kwargs):
-        """从配置创建模型"""
-        return AbabForCausalLM(config, **kwargs)
-    
-    @staticmethod
-    def get_model_type():
-        """获取模型类型"""
-        return "minimax_vl_01"
-
-# 注册MiniMaxVL01模型的多模态处理器
-MULTIMODAL_REGISTRY.register_model_class(
-    "minimax_vl_01",
-    AbabForCausalLM,
-    processor_class=MinimaxVLMultiModalProcessor,
-    processing_info_class=MinimaxVLProcessingInfo,
-    dummy_inputs_builder_class=MinimaxVLDummyInputsBuilder
-)
