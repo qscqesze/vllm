@@ -1209,29 +1209,60 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
+        """自定义权重加载函数，处理权重路径映射问题"""
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
         ]
+        
+        # 创建参数字典
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: Set[str] = set()
-
+        
+        # 创建权重名称映射
+        name_mapping = {
+            "model.embed_tokens.weight": "embed_tokens.weight",
+            "model.norm.weight": "norm.weight",
+            "lm_head.weight": "lm_head.weight"
+        }
+        
         for name, loaded_weight in weights:
+            # 检查是否需要重新映射名称
+            mapped_name = name
+            for old_name, new_name in name_mapping.items():
+                if name == old_name or name.endswith(old_name):
+                    mapped_name = name.replace(old_name, new_name)
+                    break
+            
+            # 处理堆叠参数
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
-                if weight_name not in name:
+                if weight_name not in mapped_name:
                     continue
-                name = name.replace(weight_name, param_name)
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
+                mapped_name = mapped_name.replace(weight_name, param_name)
+                
+                # 跳过不存在的参数
+                if mapped_name not in params_dict:
+                    continue
+                
+                param = params_dict[mapped_name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight, shard_id)
+                loaded_params.add(mapped_name)
                 break
             else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                # 处理专家参数映射
+                if "rotary_emb.inv_freq" in mapped_name:
+                    continue
+                
+                # 跳过不存在的参数
+                if mapped_name not in params_dict:
+                    continue
+                
+                param = params_dict[mapped_name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
-            loaded_params.add(name)
+                loaded_params.add(mapped_name)
+        
         return loaded_params
