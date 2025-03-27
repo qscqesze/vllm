@@ -1337,4 +1337,4 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
                 pass
             else:
                 new_weights[n] = p
-        return self.load_final_weights(self, new_weights.items())
+        return self.load_final_weights(new_weights.items())
