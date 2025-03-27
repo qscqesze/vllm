@@ -1078,13 +1078,26 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         
-        # 计算每个分片的大小
-        vocab_size = loaded_weight.shape[0]
-        hidden_size = loaded_weight.shape[1]
+        # 检查加载的权重是否需要转置
+        if loaded_weight.shape[0] > loaded_weight.shape[1]:
+            # 权重形状是 [vocab_size, hidden_size]
+            vocab_size = loaded_weight.shape[0]
+            hidden_size = loaded_weight.shape[1]
+        else:
+            # 权重形状是 [hidden_size, vocab_size]，需要转置
+            loaded_weight = loaded_weight.transpose(0, 1)
+            vocab_size = loaded_weight.shape[0]
+            hidden_size = loaded_weight.shape[1]
         
         # 检查参数和加载权重的形状是否兼容
         if param.shape[1] != hidden_size:
-            raise ValueError(f"Hidden size mismatch: param shape {param.shape}, loaded weight shape {loaded_weight.shape}")
+            # 尝试转置后再检查
+            if param.shape[1] == vocab_size and param.shape[0] == hidden_size:
+                # 参数形状是 [hidden_size, vocab_size]，但加载的权重是 [vocab_size, hidden_size]
+                loaded_weight = loaded_weight.transpose(0, 1)
+                vocab_size, hidden_size = hidden_size, vocab_size
+            else:
+                raise ValueError(f"Hidden size mismatch: param shape {param.shape}, loaded weight shape {loaded_weight.shape}")
         
         # 计算每个分片的大小
         shard_size = vocab_size // tp_size
@@ -1250,7 +1263,17 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             print(f"Model has {len(params_dict)} parameters")
             print(f"Loading {len(list(weights))} weights")
         
+        # 特殊处理lm_head权重
+        lm_head_weight = None
+        lm_head_name = None
+        
         for name, loaded_weight in weights:
+            # 检查是否是lm_head权重
+            if "lm_head.weight" in name:
+                lm_head_weight = loaded_weight
+                lm_head_name = name
+                continue
+            
             # 检查是否需要重新映射名称
             mapped_name = name
             for old_name, new_name in name_mapping.items():
@@ -1302,5 +1325,32 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
                         print(f"Error loading {mapped_name}: {e}")
                         print(f"Param shape: {param.shape}, Weight shape: {loaded_weight.shape}")
                     raise
+        
+        # 特殊处理lm_head权重
+        if lm_head_weight is not None and "lm_head.weight" in params_dict:
+            param = params_dict["lm_head.weight"]
+            
+            # 检查是否需要转置权重
+            if lm_head_weight.shape[0] == param.shape[1] and lm_head_weight.shape[1] == param.shape[0]:
+                lm_head_weight = lm_head_weight.transpose(0, 1)
+            
+            # 获取张量模型并行世界大小和排名
+            tp_size = get_tensor_model_parallel_world_size()
+            tp_rank = get_tensor_model_parallel_rank()
+            
+            # 计算每个分片的大小
+            vocab_size = lm_head_weight.shape[0]
+            shard_size = vocab_size // tp_size
+            
+            # 计算当前分片的范围
+            start_idx = tp_rank * shard_size
+            end_idx = min((tp_rank + 1) * shard_size, vocab_size)
+            
+            # 复制权重到参数
+            if start_idx < vocab_size:
+                # 确保我们只复制参数能容纳的部分
+                copy_size = min(end_idx - start_idx, param.shape[0])
+                param[:copy_size].data.copy_(lm_head_weight[start_idx:start_idx + copy_size])
+                loaded_params.add("lm_head.weight")
         
         return loaded_params
