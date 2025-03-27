@@ -996,6 +996,7 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         
         # 添加model属性，指向自身
         self.model = self
+        self.quant_config = quant_config
         
         # 初始化多模态组件
         # 检查是否有视觉配置，如果没有则跳过视觉模块初始化
