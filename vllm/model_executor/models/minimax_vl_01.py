@@ -994,8 +994,6 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             prefix=prefix
         )
         
-        # 添加model属性，指向自身
-        self.model = self
         self.quant_config = quant_config
         
         # 初始化多模态组件
