@@ -1049,10 +1049,17 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         
+        # 检查维度兼容性
+        if param.dim() != loaded_weight.dim():
+            raise ValueError(f"Dimension mismatch: param dim {param.dim()}, loaded weight dim {loaded_weight.dim()}")
+        
+        # 检查隐藏维度是否匹配
+        if param.shape[-1] != loaded_weight.shape[-1]:
+            raise ValueError(f"Hidden size mismatch: param shape {param.shape}, loaded weight shape {loaded_weight.shape}")
+        
         # 计算每个分片的大小
         vocab_size = loaded_weight.shape[0]
         shard_size = vocab_size // tp_size
-        padding_size = DEFAULT_VOCAB_PADDING_SIZE
         
         # 计算当前分片的范围
         start_idx = tp_rank * shard_size
@@ -1060,7 +1067,9 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         
         # 复制权重到参数
         if start_idx < vocab_size:
-            param[:end_idx-start_idx].data.copy_(loaded_weight[start_idx:end_idx])
+            # 确保我们只复制参数能容纳的部分
+            copy_size = min(end_idx - start_idx, param.shape[0])
+            param[:copy_size].data.copy_(loaded_weight[start_idx:start_idx + copy_size])
     
     @staticmethod
     def lm_head_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
@@ -1071,6 +1080,13 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         
         # 计算每个分片的大小
         vocab_size = loaded_weight.shape[0]
+        hidden_size = loaded_weight.shape[1]
+        
+        # 检查参数和加载权重的形状是否兼容
+        if param.shape[1] != hidden_size:
+            raise ValueError(f"Hidden size mismatch: param shape {param.shape}, loaded weight shape {loaded_weight.shape}")
+        
+        # 计算每个分片的大小
         shard_size = vocab_size // tp_size
         
         # 计算当前分片的范围
@@ -1079,7 +1095,9 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         
         # 复制权重到参数
         if start_idx < vocab_size:
-            param[:end_idx-start_idx].data.copy_(loaded_weight[start_idx:end_idx])
+            # 确保我们只复制参数能容纳的部分
+            copy_size = min(end_idx - start_idx, param.shape[0])
+            param[:copy_size].data.copy_(loaded_weight[start_idx:start_idx + copy_size])
 
     def make_empty_intermediate_tensors(self) -> IntermediateTensors:
         """创建空的中间张量，用于模型并行处理。"""
@@ -1207,8 +1225,7 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             return sampler(logits, sampling_metadata)
         return None
     
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         """自定义权重加载函数，处理权重路径映射问题"""
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -1228,6 +1245,11 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             "lm_head.weight": "lm_head.weight"
         }
         
+        # 记录调试信息
+        if OPEN_DEBUG:
+            print(f"Model has {len(params_dict)} parameters")
+            print(f"Loading {len(list(weights))} weights")
+        
         for name, loaded_weight in weights:
             # 检查是否需要重新映射名称
             mapped_name = name
@@ -1244,12 +1266,20 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
                 
                 # 跳过不存在的参数
                 if mapped_name not in params_dict:
+                    if OPEN_DEBUG:
+                        print(f"Skipping {mapped_name} (not found in model)")
                     continue
                 
                 param = params_dict[mapped_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight, shard_id)
-                loaded_params.add(mapped_name)
+                try:
+                    weight_loader(param, loaded_weight, shard_id)
+                    loaded_params.add(mapped_name)
+                except Exception as e:
+                    if OPEN_DEBUG:
+                        print(f"Error loading {mapped_name}: {e}")
+                        print(f"Param shape: {param.shape}, Weight shape: {loaded_weight.shape}")
+                    raise
                 break
             else:
                 # 处理专家参数映射
@@ -1258,11 +1288,19 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
                 
                 # 跳过不存在的参数
                 if mapped_name not in params_dict:
+                    if OPEN_DEBUG:
+                        print(f"Skipping {mapped_name} (not found in model)")
                     continue
                 
                 param = params_dict[mapped_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-                loaded_params.add(mapped_name)
+                try:
+                    weight_loader(param, loaded_weight)
+                    loaded_params.add(mapped_name)
+                except Exception as e:
+                    if OPEN_DEBUG:
+                        print(f"Error loading {mapped_name}: {e}")
+                        print(f"Param shape: {param.shape}, Weight shape: {loaded_weight.shape}")
+                    raise
         
         return loaded_params
