@@ -53,14 +53,6 @@ from .interfaces import HasInnerState, IsHybrid
 from .minimax_cache import MinimaxCacheManager, MinimaxCacheParams
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.model_executor.models.llava import (
-    LlavaProcessingInfo, LlavaMultiModalProcessor, LlavaDummyInputsBuilder,
-    _build_llava_or_pixtral_hf_processor, _build_llava_or_pixtral_hf_info
-)
-from .llava import init_vision_tower_for_llava
-from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
-                    LlavaDummyInputsBuilder, LlavaLikeConfig,
-                    LlavaMultiModalProjector, init_vision_tower_for_llava)
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from vllm.model_executor.layers.sampler import SamplerOutput
 from .utils import AutoWeightsLoader
@@ -1224,31 +1216,6 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         )
         
         self.quant_config = quant_config
-        
-        # 初始化多模态组件
-        # 检查是否有视觉配置，如果没有则跳过视觉模块初始化
-        self.has_vision_tower = hasattr(config, "vision_config")
-        
-        if self.has_vision_tower:
-            # 初始化视觉塔和投影器
-            self.vision_tower = init_vision_tower_for_llava(
-                config,
-                quant_config,
-                require_post_norm=False,
-                prefix=maybe_prefix(prefix, "vision_tower"))
-                
-            # 确保必要的配置属性存在
-            if not hasattr(config, "projector_hidden_act"):
-                config.projector_hidden_act = "gelu"
-            if not hasattr(config, "multimodal_projector_bias"):
-                config.multimodal_projector_bias = True
-                
-            self.multi_modal_projector = LlavaMultiModalProjector(
-                vision_hidden_size=config.vision_config.hidden_size,
-                text_hidden_size=config.hidden_size,
-                projector_hidden_act=config.projector_hidden_act,
-                multimodal_projector_bias=config.multimodal_projector_bias,
-                prefix=maybe_prefix(prefix, "multi_modal_projector"))
         
         # 保存配置
         self.config = config
