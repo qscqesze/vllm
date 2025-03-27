@@ -1217,5 +1217,5 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         
         # 加载所有权重
         for name, loaded_weight in weights:
-            weight_loader.load_weight(name, loaded_weight)
+            weight_loader.load_weights(name, loaded_weight)
 
