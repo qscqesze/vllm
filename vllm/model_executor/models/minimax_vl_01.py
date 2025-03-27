@@ -1326,3 +1326,39 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         )
         
         return hidden_states
+    
+    # 添加缺失的方法
+    def make_empty_intermediate_tensors(self, batch_size: int, seq_len: int) -> IntermediateTensors:
+        """创建空的中间张量，用于并行处理"""
+        hidden_size = self.config.hidden_size
+        device = next(self.parameters()).device
+        dtype = next(self.parameters()).dtype
+        
+        # 创建空的隐藏状态和残差
+        hidden_states = torch.zeros(
+            (batch_size * seq_len, hidden_size),
+            device=device,
+            dtype=dtype
+        )
+        residual = None
+        
+        return IntermediateTensors({
+            "hidden_states": hidden_states,
+            "residual": residual
+        })
+    
+    # 添加多模态处理器工厂方法
+    @classmethod
+    def get_multimodal_processor(cls, ctx):
+        """获取多模态处理器"""
+        return MinimaxVLMultiModalProcessor(ctx)
+    
+    @classmethod
+    def get_multimodal_processing_info(cls, ctx):
+        """获取多模态处理信息"""
+        return MinimaxVLProcessingInfo(ctx)
+    
+    @classmethod
+    def get_dummy_inputs_builder(cls, ctx):
+        """获取测试输入构建器"""
+        return MinimaxVLDummyInputsBuilder(ctx)
