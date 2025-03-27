@@ -1028,28 +1028,58 @@ class MinimaxVLProcessingInfo(BaseProcessingInfo):
             return hf_config.num_image_tokens
             
         # 否则，根据视觉配置计算
-        vision_config = hf_config.visual
+        if hasattr(hf_config, "vision_config"):
+            vision_config = hf_config.vision_config
+        elif hasattr(hf_config, "visual"):
+            vision_config = hf_config.visual
+        else:
+            # 默认值，如果无法确定
+            return 576  # 常见的默认值 (24x24)
         
         # 计算图像标记数量
-        image_size = vision_config["image_size"]
-        patch_size = vision_config["patch_size"]
+        if hasattr(vision_config, "image_size") and hasattr(vision_config, "patch_size"):
+            image_size = vision_config.image_size
+            patch_size = vision_config.patch_size
+        elif isinstance(vision_config, dict) and "image_size" in vision_config and "patch_size" in vision_config:
+            image_size = vision_config["image_size"]
+            patch_size = vision_config["patch_size"]
+        else:
+            # 默认值
+            return 576
         
-        # 假设每个图像被分成 patch_size x patch_size 的块
-        # 然后每个块对应一个标记
+        # 计算网格大小
         grid_size = (image_size // patch_size) ** 2
         
         # 一些模型可能会进一步压缩标记数量
-        compression_factor = getattr(vision_config, "compression_factor", 1)
+        compression_factor = 1
+        if hasattr(vision_config, "compression_factor"):
+            compression_factor = vision_config.compression_factor
+        elif isinstance(vision_config, dict) and "compression_factor" in vision_config:
+            compression_factor = vision_config["compression_factor"]
         
         return grid_size // compression_factor
         
     def get_image_size_with_most_features(self) -> ImageSize:
         """获取具有最多特征的图像尺寸"""
         hf_config = self.get_hf_config()
-        vision_config = hf_config.visual
         
-        # 获取图像尺寸
-        image_size = vision_config["image_size"]
+        # 尝试不同的配置结构获取图像尺寸
+        if hasattr(hf_config, "vision_config"):
+            vision_config = hf_config.vision_config
+            if hasattr(vision_config, "image_size"):
+                image_size = vision_config.image_size
+            elif isinstance(vision_config, dict) and "image_size" in vision_config:
+                image_size = vision_config["image_size"]
+            else:
+                image_size = 224  # 默认值
+        elif hasattr(hf_config, "visual"):
+            vision_config = hf_config.visual
+            if isinstance(vision_config, dict) and "image_size" in vision_config:
+                image_size = vision_config["image_size"]
+            else:
+                image_size = 224  # 默认值
+        else:
+            image_size = 224  # 默认值
         
         return ImageSize(width=image_size, height=image_size)
 
