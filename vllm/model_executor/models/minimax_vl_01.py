@@ -3,7 +3,7 @@
 import copy
 import math
 import re
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union, Set
 
 import torch
 import torch.distributed
@@ -36,7 +36,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
@@ -57,6 +57,8 @@ from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from vllm.model_executor.layers.sampler import SamplerOutput
 from .utils import AutoWeightsLoader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader, maybe_remap_kv_scale_name)
 
 def replace_weight_name(name: str,
                         key: str = None,
@@ -1205,7 +1207,134 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             sampler = Sampler()
             return sampler(logits, sampling_metadata)
         return None
+    
+    def load_final_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+        ]
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="w1",
+            ckpt_down_proj_name="w2",
+            ckpt_up_proj_name="w3",
+            num_experts=self.config.num_local_experts)
+
+        params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
+        for name, loaded_weight in weights:
+            if "rotary_emb.inv_freq" in name:
+                continue
+
+            if (self.quant_config is not None and
+                (scale_name := self.quant_config.get_cache_scale(name))):
+                # Loading kv cache quantization scales
+                param = params_dict[scale_name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
+                                 loaded_weight[0])
+                weight_loader(param, loaded_weight)
+                loaded_params.add(scale_name)
+                continue
+
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if ((name.endswith(".bias") or name.endswith("_bias"))
+                        and name not in params_dict):
+                    continue
+                # Skip layers on other devices.
+                if is_pp_missing_parameter(name, self):
+                    continue
+                if name.endswith("scale"):
+                    # Remapping the name of FP8 kv-scale.
+                    name = maybe_remap_kv_scale_name(name, params_dict)
+                    if name is None:
+                        continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                for mapping in expert_params_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    # Skip layers on other devices.
+                    if is_pp_missing_parameter(name, self):
+                        continue
+                    if ((name.endswith(".bias") or name.endswith("_bias"))
+                            and name not in params_dict):
+                        continue
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param,
+                                  loaded_weight,
+                                  name,
+                                  shard_id=shard_id,
+                                  expert_id=expert_id)
+                    break
+                else:
+                    # Skip loading extra bias for GPTQ models.
+                    if ((name.endswith(".bias") or name.endswith("_bias"))
+                            and name not in params_dict):
+                        continue
+                    # Skip layers on other devices.
+                    if is_pp_missing_parameter(name, self):
+                        continue
+                    # Remapping the name of FP8 kv-scale.
+                    name = maybe_remap_kv_scale_name(name, params_dict)
+                    if name is None:
+                        continue
+
+                    param = params_dict[name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
+
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        new_weights = {}
+        for n, p in weights:
+            if n.endswith('.block_sparse_moe.input_linear.weight'):
+                for e in range(p.size(0)):
+                    w1_name = n.replace(
+                        '.block_sparse_moe.input_linear.weight',
+                        f".block_sparse_moe.experts.{e}.w1.weight")
+                    w3_name = n.replace(
+                        '.block_sparse_moe.input_linear.weight',
+                        f".block_sparse_moe.experts.{e}.w3.weight")
+                    w1_param, w3_param = p[e].chunk(2, dim=0)
+                    assert w1_name not in new_weights
+                    assert w3_name not in new_weights
+                    new_weights[w1_name] = w1_param
+                    new_weights[w3_name] = w3_param
+            elif n.endswith('.block_sparse_moe.output_linear.weight'):
+                for e in range(p.size(0)):
+                    w2_name = n.replace(
+                        '.block_sparse_moe.output_linear.weight',
+                        f".block_sparse_moe.experts.{e}.w2.weight")
+                    w2_param = p[e]
+                    assert w2_name not in new_weights
+                    new_weights[w2_name] = w2_param
+            elif n.endswith('.block_sparse_moe.router.layer.weight'):
+                gate_name = n.replace('.block_sparse_moe.router.layer.weight',
+                                      ".block_sparse_moe.gate.weight")
+                assert gate_name not in new_weights
+                new_weights[gate_name] = p
+            elif n == 'lm_head.weight' and self.config.tie_word_embeddings:
+                pass
+            else:
+                new_weights[n] = p
+        return self.load_final_weights(self, new_weights.items())
