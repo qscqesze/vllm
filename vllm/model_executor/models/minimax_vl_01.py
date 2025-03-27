@@ -1363,12 +1363,110 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         """获取测试输入构建器"""
         return MinimaxVLDummyInputsBuilder(ctx)
     
-    # 添加权重加载方法
-    def load_weights(self, weights):
-        """加载模型权重"""
-        # 使用AutoWeightsLoader加载权重
-        loader = AutoWeightsLoader(self, default_weight_loader)
-        return loader.load_weights(weights)
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
+        """自定义权重加载函数，处理权重路径映射问题"""
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+        ]
+        
+        # 创建参数字典
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
+        
+        # 创建权重名称映射
+        name_mapping = {
+            "model.embed_tokens.weight": "embed_tokens.weight",
+            "model.norm.weight": "norm.weight",
+            "lm_head.weight": "lm_head.weight"
+        }
+        
+        # 记录调试信息
+        if OPEN_DEBUG:
+            print(f"Model has {len(params_dict)} parameters")
+            print(f"Loading {len(list(weights))} weights")
+        
+        # 特殊处理lm_head权重
+        lm_head_weight = None
+        lm_head_name = None
+        
+        for name, loaded_weight in weights:
+            # 检查是否是lm_head权重
+            if "lm_head.weight" in name:
+                lm_head_weight = loaded_weight
+                lm_head_name = name
+                continue
+            
+            # 检查是否需要重新映射名称
+            mapped_name = name
+            for old_name, new_name in name_mapping.items():
+                if name == old_name or name.endswith(old_name):
+                    mapped_name = name.replace(old_name, new_name)
+                    break
+            
+            # 处理堆叠参数
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in mapped_name:
+                    continue
+                mapped_name = mapped_name.replace(weight_name, param_name)
+                
+                # 跳过不存在的参数
+                if mapped_name not in params_dict:
+                    if OPEN_DEBUG:
+                        print(f"Skipping {mapped_name} (not found in model)")
+                    continue
+                
+                param = params_dict[mapped_name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                try:
+                    weight_loader(param, loaded_weight, shard_id)
+                    loaded_params.add(mapped_name)
+                except Exception as e:
+                    if OPEN_DEBUG:
+                        print(f"Error loading {mapped_name}: {e}")
+                        print(f"Param shape: {param.shape}, Weight shape: {loaded_weight.shape}")
+                    raise
+                break
+            else:
+                # 处理专家参数映射
+                if "rotary_emb.inv_freq" in mapped_name:
+                    continue
+                
+                # 跳过不存在的参数
+                if mapped_name not in params_dict:
+                    if OPEN_DEBUG:
+                        print(f"Skipping {mapped_name} (not found in model)")
+                    continue
+                
+                param = params_dict[mapped_name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                try:
+                    weight_loader(param, loaded_weight)
+                    loaded_params.add(mapped_name)
+                except Exception as e:
+                    if OPEN_DEBUG:
+                        print(f"Error loading {mapped_name}: {e}")
+                        print(f"Param shape: {param.shape}, Weight shape: {loaded_weight.shape}")
+                    raise
+        
+        # 特殊处理lm_head权重
+        if lm_head_weight is not None and "lm_head.weight" in params_dict:
+            param = params_dict["lm_head.weight"]
+            weight_loader = getattr(param, "weight_loader", self.lm_head_weight_loader)
+            
+            try:
+                # 使用自定义的权重加载器
+                weight_loader(param, lm_head_weight)
+                loaded_params.add("lm_head.weight")
+            except Exception as e:
+                if OPEN_DEBUG:
+                    print(f"Error loading lm_head.weight: {e}")
+                    print(f"Param shape: {param.shape}, Weight shape: {lm_head_weight.shape}")
+                raise
+        
+        return loaded_params
     
     # 添加模型类型识别方法
     @staticmethod
