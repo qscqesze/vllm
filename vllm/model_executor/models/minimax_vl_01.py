@@ -1078,30 +1078,9 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         
-        # 打印调试信息
-        if OPEN_DEBUG:
-            print(f"LM head param shape: {param.shape}")
-            print(f"LM head weight shape: {loaded_weight.shape}")
-        
         # 检查是否需要转置权重
-        # 如果权重形状是 [hidden_size, vocab_size]，需要转置为 [vocab_size, hidden_size]
-        if loaded_weight.shape[0] == param.shape[1] // tp_size and loaded_weight.shape[1] != param.shape[1] // tp_size:
+        if loaded_weight.shape[0] == param.shape[1] and loaded_weight.shape[1] == param.shape[0] * tp_size:
             loaded_weight = loaded_weight.transpose(0, 1)
-            if OPEN_DEBUG:
-                print(f"Transposed LM head weight shape: {loaded_weight.shape}")
-        
-        # 如果权重形状是 [vocab_size, hidden_size]，但hidden_size不匹配
-        # 这种情况可能是模型配置不同导致的
-        if loaded_weight.shape[1] != param.shape[1] // tp_size:
-            if OPEN_DEBUG:
-                print(f"Hidden size mismatch in LM head: param={param.shape[1]}, weight={loaded_weight.shape[1]}")
-            
-            # 如果是特殊情况：权重形状是 [hidden_size, vocab_size]
-            if loaded_weight.shape[0] == param.shape[1] // tp_size and loaded_weight.shape[1] == param.shape[0] * tp_size:
-                # 这种情况下，权重已经是转置的形式，我们需要再次转置回来
-                loaded_weight = loaded_weight.transpose(0, 1)
-                if OPEN_DEBUG:
-                    print(f"Re-transposed LM head weight shape: {loaded_weight.shape}")
         
         # 计算每个分片的大小
         vocab_size = loaded_weight.shape[0]
@@ -1116,29 +1095,25 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             # 确保我们只复制参数能容纳的部分
             copy_size = min(end_idx - start_idx, param.shape[0])
             
-            if param.shape[1] == loaded_weight.shape[1]:
+            # 处理隐藏维度不匹配的情况
+            if param.shape[1] != loaded_weight.shape[1]:
+                # 创建一个新的权重张量，大小与参数匹配
+                new_weight = torch.zeros(
+                    loaded_weight.shape[0], 
+                    param.shape[1],
+                    device=loaded_weight.device, 
+                    dtype=loaded_weight.dtype
+                )
+                
+                # 复制加载的权重到新权重的前部分
+                min_dim = min(param.shape[1], loaded_weight.shape[1])
+                new_weight[:, :min_dim] = loaded_weight[:, :min_dim]
+                
+                # 使用新权重进行复制
+                param[:copy_size].data.copy_(new_weight[start_idx:start_idx + copy_size])
+            else:
                 # 如果隐藏维度匹配，直接复制
                 param[:copy_size].data.copy_(loaded_weight[start_idx:start_idx + copy_size])
-            else:
-                # 如果隐藏维度不匹配，这可能是一个更复杂的情况
-                # 例如，模型可能使用了不同的隐藏大小或者有特殊的权重结构
-                # 在这种情况下，我们需要一个更复杂的映射逻辑
-                # 这里我们假设权重是按照某种方式组织的，需要根据实际情况调整
-                if OPEN_DEBUG:
-                    print(f"Complex LM head weight mapping required")
-                
-                # 如果权重形状是 [vocab_size, hidden_size]，但hidden_size不匹配
-                # 我们可以尝试使用线性插值或者截断/填充来处理
-                if loaded_weight.shape[1] < param.shape[1] // tp_size:
-                    # 如果加载的权重隐藏维度更小，我们可以填充剩余部分为0
-                    padded_weight = torch.zeros(loaded_weight.shape[0], param.shape[1] // tp_size, 
-                                               device=loaded_weight.device, dtype=loaded_weight.dtype)
-                    padded_weight[:, :loaded_weight.shape[1]] = loaded_weight
-                    param[:copy_size].data.copy_(padded_weight[start_idx:start_idx + copy_size])
-                elif loaded_weight.shape[1] > param.shape[1] // tp_size:
-                    # 如果加载的权重隐藏维度更大，我们可以截断多余部分
-                    truncated_weight = loaded_weight[:, :param.shape[1] // tp_size]
-                    param[:copy_size].data.copy_(truncated_weight[start_idx:start_idx + copy_size])
 
     def make_empty_intermediate_tensors(self) -> IntermediateTensors:
         """创建空的中间张量，用于模型并行处理。"""
