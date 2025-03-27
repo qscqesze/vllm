@@ -1009,6 +1009,7 @@ class MinimaxVLProcessingInfo:
     
     def get_hf_config(self):
         """获取HF配置"""
+        # 直接返回模型配置，不使用特定类型检查
         return self.ctx.model_config.hf_config
     
     def get_tokenizer(self):
@@ -1149,8 +1150,8 @@ class MinimaxVLDummyInputsBuilder:
 class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     """MiniMaxText01 model with multimodal capabilities."""
     
-    # 添加一个类变量来指定正确的配置类型
-    _mm_config_class = "LlavaConfig"
+    # 更新配置类型，使其更通用
+    _mm_config_class = None  # 允许任何配置类型
     
     def __init__(
         self,
