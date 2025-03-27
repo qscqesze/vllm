@@ -1014,7 +1014,8 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
                 vision_hidden_size=config.vision_config.hidden_size,
                 text_hidden_size=config.hidden_size,
                 projector_hidden_act=config.projector_hidden_act,
-                multimodal_projector_bias=config.multimodal_projector_bias)
+                multimodal_projector_bias=config.multimodal_projector_bias,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"))
         
         # 保存配置
         self.config = config
@@ -1040,9 +1041,6 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     @staticmethod
     def embed_tokens_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
         """自定义的词汇嵌入权重加载器，处理词汇大小不匹配的情况"""
-        if OPEN_DEBUG:
-            print(f"embed_tokens_weight_loader: param.shape={param.shape}, loaded_weight.shape={loaded_weight.shape}")
-        
         # 获取张量模型并行世界大小和排名
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
@@ -1063,9 +1061,6 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     @staticmethod
     def lm_head_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
         """自定义的语言模型头权重加载器，处理词汇大小不匹配的情况"""
-        if OPEN_DEBUG:
-            print(f"lm_head_weight_loader: param.shape={param.shape}, loaded_weight.shape={loaded_weight.shape}")
-        
         # 获取张量模型并行世界大小和排名
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
@@ -1101,35 +1096,63 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         )
     
     def get_multimodal_embeddings(self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+        """获取多模态嵌入"""
         # 如果没有视觉塔，返回None
         if not self.has_vision_tower:
             return None
             
-        # 使用LlavaForConditionalGeneration的实现
-        from vllm.model_executor.models.llava import LlavaForConditionalGeneration
-        dummy_llava = LlavaForConditionalGeneration.__new__(LlavaForConditionalGeneration)
-        dummy_llava.config = self.config
-        dummy_llava.vision_tower = self.vision_tower
-        dummy_llava.multi_modal_projector = self.multi_modal_projector
+        # 获取图像处理器和图像
+        processor = kwargs.get("processor")
+        images = kwargs.get("images")
         
-        return dummy_llava.get_multimodal_embeddings(**kwargs)
+        if processor is None or images is None:
+            return None
+            
+        # 处理图像并获取视觉特征
+        vision_tower_output = self.vision_tower(images)
+        image_features = vision_tower_output.last_hidden_state
+        
+        # 使用多模态投影器处理视觉特征
+        projected_features = self.multi_modal_projector(image_features)
+        
+        # 创建并返回多模态嵌入
+        return MultiModalEmbeddings(
+            embeddings=projected_features,
+            positions=kwargs.get("positions"),
+            image_sizes=kwargs.get("image_sizes")
+        )
     
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
-        # 如果没有视觉塔，直接使用普通的嵌入
-        if not self.has_vision_tower:
+        """获取输入嵌入，包括文本和可能的视觉嵌入"""
+        # 如果没有多模态嵌入，直接使用普通的嵌入
+        if multimodal_embeddings is None:
             return self.embed_scale * self.embed_tokens(input_ids)
             
-        # 使用LlavaForConditionalGeneration的实现
-        from vllm.model_executor.models.llava import LlavaForConditionalGeneration
-        dummy_llava = LlavaForConditionalGeneration.__new__(LlavaForConditionalGeneration)
-        dummy_llava.config = self.config
-        dummy_llava.language_model = self
+        # 获取文本嵌入
+        text_embeddings = self.embed_scale * self.embed_tokens(input_ids)
         
-        return dummy_llava.get_input_embeddings(input_ids, multimodal_embeddings)
+        # 如果有多模态嵌入，将其与文本嵌入合并
+        # 找到图像标记的位置
+        image_token_positions = (input_ids == self.config.image_token_id).nonzero(as_tuple=True)[0]
+        
+        if len(image_token_positions) == 0:
+            # 没有图像标记，直接返回文本嵌入
+            return text_embeddings
+            
+        # 替换图像标记位置的嵌入
+        for i, pos in enumerate(image_token_positions):
+            if i < len(multimodal_embeddings.embeddings):
+                # 获取当前图像的嵌入
+                image_embedding = multimodal_embeddings.embeddings[i]
+                
+                # 替换文本嵌入中的图像标记
+                text_embeddings[pos:pos+1] = image_embedding
+                
+        return text_embeddings
     
     def forward(
         self,
@@ -1140,6 +1163,7 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        """前向传播，处理输入并生成输出"""
         if intermediate_tensors is not None:
             inputs_embeds = None
         elif inputs_embeds is None:
@@ -1163,8 +1187,7 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        # 需要实现这个方法，而不是调用父类的方法
-        # 因为MiniMaxVL01Model没有实现compute_logits
+        """计算logits"""
         if get_pp_group().is_last_rank:
             return self.lm_head(hidden_states)
         return None
@@ -1174,7 +1197,7 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        # 需要实现这个方法，而不是调用父类的方法
+        """采样生成下一个token"""
         if get_pp_group().is_last_rank:
             sampler = Sampler()
             return sampler(logits, sampling_metadata)
@@ -1189,248 +1212,10 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         """
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         
-        # 定义权重加载器映射
-        weight_loaders = {
-            # 稀疏MoE权重加载器
-            "block_sparse_moe.experts": self._load_sparse_moe_weight,
-            # 共享MLP权重加载器
-            "shared_mlp": self._load_shared_mlp_weight,
-            # Flash注意力权重加载器
-            "self_attn": self._load_flash_attn_weight,
-            # 层归一化权重加载器
-            "norm": self._load_layer_norm_weight,
-        }
+        # 创建自动权重加载器
+        weight_loader = AutoWeightsLoader(self)
         
-        # 默认权重加载器
-        default_loader = self._load_basic_weight
-        
+        # 加载所有权重
         for name, loaded_weight in weights:
-            # 移除可能的"model."前缀
-            param_name = name
-            if name.startswith("model."):
-                param_name = name[len("model."):]
-                
-            # 根据权重名称选择合适的加载器
-            for key, loader in weight_loaders.items():
-                if key in param_name:
-                    loader(name, loaded_weight)
-                    break
-            else:
-                # 如果没有匹配的特殊加载器，使用默认加载器
-                default_loader(name, loaded_weight)
-    
-    def _load_sparse_moe_weight(self, name: str, loaded_weight: torch.Tensor) -> None:
-        """加载稀疏MoE权重。
-        
-        处理形如：
-        - model.layers.26.block_sparse_moe.experts.13.w1.weight
-        - model.layers.26.block_sparse_moe.experts.13.w2.weight
-        - model.layers.26.block_sparse_moe.experts.13.w3.weight
-        的权重
-        """
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        OPEN_DEBUG = False
-        
-        # 提取专家ID和权重类型
-        match = re.search(r'experts\.(\d+)\.([^.]+)', name)
-        if not match:
-            return
-            
-        expert_id = int(match.group(1))
-        weight_name = match.group(2)
-        
-        # 映射权重名称
-        param_mapping = {
-            "w1": "w13_weight",
-            "w3": "w13_weight",
-            "w2": "w2_weight",
-        }
-        
-        param_name = param_mapping.get(weight_name)
-        if not param_name:
-            return
-            
-        # 构建新的参数名称
-        param_path = name.rsplit(".", 1)[0]  # 获取路径部分，去掉最后的权重名
-        param_path = param_path.replace(f"experts.{expert_id}", "experts")  # 移除专家ID
-        if param_path.startswith("model."):
-            param_path = param_path[len("model."):]  # 移除"model."前缀
-        new_name = f"{param_path}.{param_name}"
-        
-        if OPEN_DEBUG:
-            print(f"{self.__class__.__name__}.[MOE] load weights param_name = {param_name}, weight_name = {weight_name}, expert_id = {expert_id}")
-            print(f"{self.__class__.__name__}.[MOE] name = {name} -> {new_name}")
-        
-        if new_name not in params_dict:
-            if OPEN_DEBUG:
-                print(f"{self.__class__.__name__}.[MOE] param {new_name} not found, skipping")
-            return
-            
-        param = params_dict[new_name]
-        weight_loader = getattr(param, "weight_loader", default_weight_loader)
-        weight_loader(param, loaded_weight, weight_name, expert_id=expert_id)
-    
-    def _load_shared_mlp_weight(self, name: str, loaded_weight: torch.Tensor) -> None:
-        """加载共享MLP权重。
-        
-        处理形如：
-        - model.layers.0.shared_mlp.gate_up_proj.weight
-        - model.layers.0.shared_mlp.down_proj.weight
-        的权重
-        """
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        OPEN_DEBUG = False
-        
-        processed_name = name
-        if name.startswith("model."):
-            processed_name = name[len("model."):]
-        
-        if not hasattr(self, 'CONCAT_FFN'):
-            self.CONCAT_FFN = False  # 默认值
-        
-        # 映射权重名称
-        if not self.CONCAT_FFN:
-            if "gate_proj" in processed_name:
-                processed_name = processed_name.replace("gate_proj", "w1", 1)
-            elif "up_proj" in processed_name:
-                processed_name = processed_name.replace("up_proj", "w3", 1)
-            elif "down_proj" in processed_name:
-                processed_name = processed_name.replace("down_proj", "w2", 1)
-        else:
-            if "gate_proj" in processed_name:
-                processed_name = processed_name.replace("gate_proj", "gate_up_proj", 1)
-                loaded_shard_id = 0
-            elif "up_proj" in processed_name:
-                processed_name = processed_name.replace("up_proj", "gate_up_proj", 1)
-                loaded_shard_id = 1
-        
-        if OPEN_DEBUG:
-            print(f"{self.__class__.__name__}.[SHARED] load weights name = {processed_name}")
-        
-        # 检查参数是否存在
-        if processed_name not in params_dict:
-            if OPEN_DEBUG:
-                print(f"{self.__class__.__name__}.[SHARED] param {processed_name} not found, skipping")
-            return
-        
-        param = params_dict[processed_name]
-        weight_loader = getattr(param, "weight_loader", default_weight_loader)
-        weight_loader(param, loaded_weight)
-    
-    def _load_flash_attn_weight(self, name: str, loaded_weight: torch.Tensor) -> None:
-        """加载Flash注意力权重。
-        
-        处理形如：
-        - model.layers.15.self_attn.k_proj.weight
-        - model.layers.15.self_attn.o_proj.weight
-        - model.layers.15.self_attn.q_proj.weight
-        - model.layers.15.self_attn.v_proj.weight
-        的权重
-        """
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        OPEN_DEBUG = False
-        
-        # 映射权重名称
-        weight_mapping = {
-            "q_proj": ("qkv_proj", "q"),
-            "k_proj": ("qkv_proj", "k"),
-            "v_proj": ("qkv_proj", "v"),
-            "o_proj": ("out_proj", None),
-        }
-        
-        for weight_name, (param_name, shard_id) in weight_mapping.items():
-            if weight_name not in name:
-                continue
-                
-            # 处理权重名称前缀，移除 "model." 前缀
-            processed_name = name
-            if name.startswith("model."):
-                processed_name = name[len("model."):]
-                
-            # 替换权重名称部分
-            processed_name = processed_name.replace(weight_name, param_name)
-            
-            if OPEN_DEBUG:
-                print(f"{self.__class__.__name__}.[FLASH] load weights param_name = {param_name}, weight_name = {weight_name}, shard_id = {shard_id}")
-                print(f"{self.__class__.__name__}.[FLASH] name = {name} -> {processed_name}")
-            
-            # 检查参数是否存在
-            if processed_name not in params_dict:
-                if OPEN_DEBUG:
-                    print(f"{self.__class__.__name__}.[FLASH] param {processed_name} not found, skipping")
-                continue
-                
-            param = params_dict[processed_name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            
-            if shard_id is not None:
-                weight_loader(param, loaded_weight, shard_id)
-            else:
-                weight_loader(param, loaded_weight)
-            break
-    
-    def _load_layer_norm_weight(self, name: str, loaded_weight: torch.Tensor) -> None:
-        """加载层归一化权重。
-        
-        处理形如：
-        - model.layers.21.input_layernorm.weight
-        - model.layers.21.post_attention_layernorm.weight
-        的权重
-        """
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        OPEN_DEBUG = False
-        
-        # 处理权重名称前缀，移除 "model." 前缀
-        param_name = name
-        if name.startswith("model."):
-            param_name = name[len("model."):]
-        
-        # 尝试获取参数，如果不存在则跳过
-        if param_name not in params_dict:
-            if OPEN_DEBUG:
-                print(f"{self.__class__.__name__}.[NORM] param {param_name} not found, skipping")
-            return
-            
-        param = params_dict[param_name]
-        weight_loader = getattr(param, "weight_loader", default_weight_loader)
-        weight_loader(param, loaded_weight)
-    
-    def _load_basic_weight(self, name: str, loaded_weight: torch.Tensor) -> None:
-        """加载基本权重。
-        
-        处理所有其他类型的权重。
-        """
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        OPEN_DEBUG = False
-        
-        # 处理权重名称前缀，移除 "model." 前缀
-        param_name = name
-        if name.startswith("model."):
-            param_name = name[len("model."):]
-        
-        # 特殊处理词汇嵌入权重
-        if "embed_tokens.weight" in param_name or "lm_head.weight" in param_name:
-            if param_name not in params_dict:
-                if OPEN_DEBUG:
-                    print(f"{self.__class__.__name__}.[BASIC] param {param_name} not found, skipping")
-                return
-                
-            param = params_dict[param_name]
-            
-            # 使用自定义加载方法处理词汇嵌入权重
-            if param.data.shape[0] != loaded_weight.shape[0]:
-                # 确保我们只复制有效的部分
-                min_vocab_size = min(param.data.shape[0], loaded_weight.shape[0])
-                param.data[:min_vocab_size].copy_(loaded_weight[:min_vocab_size])
-                return
-        
-        # 尝试获取参数，如果不存在则跳过
-        if param_name not in params_dict:
-            if OPEN_DEBUG:
-                print(f"{self.__class__.__name__}.[BASIC] param {param_name} not found, skipping")
-            return
-            
-        param = params_dict[param_name]
-        weight_loader = getattr(param, "weight_loader", default_weight_loader)
-        weight_loader(param, loaded_weight)
+            weight_loader.load_weight(name, loaded_weight)
 
