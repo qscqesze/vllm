@@ -1008,8 +1008,7 @@ class MinimaxVLProcessingInfo:
         self.ctx = ctx
     
     def get_hf_config(self):
-        """获取HF配置"""
-        # 直接返回模型配置，不使用特定类型检查
+        """获取HF配置，直接返回，不进行类型检查"""
         return self.ctx.model_config.hf_config
     
     def get_tokenizer(self):
@@ -1150,8 +1149,11 @@ class MinimaxVLDummyInputsBuilder:
 class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     """MiniMaxText01 model with multimodal capabilities."""
     
-    # 更新配置类型，使其更通用
-    _mm_config_class = None  # 允许任何配置类型
+    # 移除配置类型限制
+    _mm_config_class = None
+    
+    # 添加模型类型标识
+    model_type = "minimax_vl_01"
     
     def __init__(
         self,
@@ -1479,3 +1481,12 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     def get_model_type():
         """获取模型类型"""
         return "minimax_vl_01"
+
+# 注册MiniMaxVL01模型的多模态处理器
+MULTIMODAL_REGISTRY.register_model_class(
+    "minimax_vl_01",
+    AbabForCausalLM,
+    processor_class=MinimaxVLMultiModalProcessor,
+    processing_info_class=MinimaxVLProcessingInfo,
+    dummy_inputs_builder_class=MinimaxVLDummyInputsBuilder
+)
