@@ -70,6 +70,7 @@ from vllm.multimodal.processing import BaseMultiModalProcessor, ProcessingCache
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
+from vllm.multimodal.parse import ImageSize
 
 def replace_weight_name(name: str,
                         key: str = None,
@@ -987,6 +988,10 @@ class MiniMaxVL01Model(nn.Module):
 class MinimaxVLProcessingInfo(BaseProcessingInfo):
     """MiniMax VL 模型的处理信息类，提供模型处理所需的配置和方法"""
 
+    def get_hf_config(self) -> PretrainedConfig:
+        """获取模型的配置"""
+        return self.ctx.hf_config  # 直接返回原始配置，不进行类型转换
+
     def get_tokenizer(self) -> PreTrainedTokenizer:
         """获取模型的分词器"""
         tokenizer = self.ctx.tokenizer
@@ -1025,7 +1030,7 @@ class MinimaxVLProcessingInfo(BaseProcessingInfo):
         # 否则，根据视觉配置计算
         vision_config = hf_config.visual
         
-        # 计算图像标记数量（类似于 Qwen-VL 的计算方式）
+        # 计算图像标记数量
         image_size = vision_config["image_size"]
         patch_size = vision_config["patch_size"]
         
@@ -1037,6 +1042,16 @@ class MinimaxVLProcessingInfo(BaseProcessingInfo):
         compression_factor = getattr(vision_config, "compression_factor", 1)
         
         return grid_size // compression_factor
+        
+    def get_image_size_with_most_features(self) -> ImageSize:
+        """获取具有最多特征的图像尺寸"""
+        hf_config = self.get_hf_config()
+        vision_config = hf_config.visual
+        
+        # 获取图像尺寸
+        image_size = vision_config["image_size"]
+        
+        return ImageSize(width=image_size, height=image_size)
 
 
 class MinimaxMultiModalProcessor(BaseMultiModalProcessor[MinimaxVLProcessingInfo]):
@@ -1160,8 +1175,6 @@ class MinimaxDummyInputsBuilder(BaseDummyInputsBuilder[MinimaxVLProcessingInfo])
                                        dummy_inputs=MinimaxDummyInputsBuilder)
 class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     """MiniMaxText01 model with multimodal capabilities."""
-    
-    _mm_config_class = "LlavaConfig"
     
     def __init__(
         self,
