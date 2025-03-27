@@ -1330,13 +1330,22 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
         if lm_head_weight is not None and "lm_head.weight" in params_dict:
             param = params_dict["lm_head.weight"]
             
-            # 检查是否需要转置权重
-            if lm_head_weight.shape[0] == param.shape[1] and lm_head_weight.shape[1] == param.shape[0]:
-                lm_head_weight = lm_head_weight.transpose(0, 1)
-            
             # 获取张量模型并行世界大小和排名
             tp_size = get_tensor_model_parallel_world_size()
             tp_rank = get_tensor_model_parallel_rank()
+            
+            # 打印调试信息
+            if OPEN_DEBUG:
+                print(f"LM head param shape: {param.shape}")
+                print(f"LM head weight shape: {lm_head_weight.shape}")
+            
+            # 检查是否需要转置权重
+            if lm_head_weight.shape[0] != param.shape[0] * tp_size:
+                # 如果维度不匹配，尝试转置
+                if lm_head_weight.shape[1] == param.shape[0] * tp_size:
+                    lm_head_weight = lm_head_weight.transpose(0, 1)
+                    if OPEN_DEBUG:
+                        print(f"Transposed LM head weight shape: {lm_head_weight.shape}")
             
             # 计算每个分片的大小
             vocab_size = lm_head_weight.shape[0]
@@ -1350,7 +1359,21 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             if start_idx < vocab_size:
                 # 确保我们只复制参数能容纳的部分
                 copy_size = min(end_idx - start_idx, param.shape[0])
-                param[:copy_size].data.copy_(lm_head_weight[start_idx:start_idx + copy_size])
+                
+                # 检查维度是否匹配
+                if param.dim() == 2 and lm_head_weight.dim() == 2:
+                    # 如果两者都是二维张量，确保第二维匹配
+                    if param.shape[1] != lm_head_weight.shape[1]:
+                        raise ValueError(f"LM head dimension mismatch: param shape {param.shape}, "
+                                        f"weight shape {lm_head_weight.shape}")
+                    
+                    # 复制权重
+                    param[:copy_size].data.copy_(lm_head_weight[start_idx:start_idx + copy_size])
+                else:
+                    # 使用自定义的权重加载器
+                    weight_loader = getattr(param, "weight_loader", self.lm_head_weight_loader)
+                    weight_loader(param, lm_head_weight)
+                
                 loaded_params.add("lm_head.weight")
         
         return loaded_params
