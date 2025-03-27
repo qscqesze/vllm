@@ -1182,439 +1182,255 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
 
     def load_weights(self,
                      weights: Iterable[Tuple[str, torch.Tensor]]) -> None:
-        if OPEN_DEBUG:
-            print(f"{AbabForCausalLM.__name__}. load_weights")
-
-        # parameter process
-        params_dict = dict(self.named_parameters())
-        # process and print
-        if True:
-            print(f"{AbabForCausalLM.__name__}.<===============>")
-            print(f"{AbabForCausalLM.__name__}.now .. loop named_parameters. ")
-            for name, param in self.named_parameters():
-                param_shape = None
-                if param is not None and hasattr(param, "data") and hasattr(param.data, "shape"):
-                    param_shape = param.data.shape
-                print(f"{AbabForCausalLM.__name__}.param.name = {name}, param.shape = {param_shape}")
-
-        # load every weights
-        if OPEN_DEBUG:
-            print(f"{AbabForCausalLM.__name__}.<===============>")
-
-        def which_layer(name: str) -> int:
-            if "layers" in name:
-                after_layer = name.split("layers")[-1]
-                return int(after_layer.split(".")[1])
-            return None
-
-        def is_linear_attn_layer(layer_idx: int) -> bool:
-            if layer_idx is None or not hasattr(self.config, "attn_type_list"):
-                return False
-            return self.config.attn_type_list[layer_idx] == 0
-
-        def is_moe_weight(name: str) -> bool:
-            if "block_sparse_moe" in name:
-                if name.endswith(".bias"):
-                    return False
-                return True
-            return False
-
-        def load_sparse_moe_weight(name: str, loaded_weight: torch.Tensor) -> None:
-            # model.layers.26.block_sparse_moe.experts.13.w1.weight, shape = torch.Size([4096, 4096])
-            # model.layers.26.block_sparse_moe.experts.13.w2.weight, shape = torch.Size([4096, 4096])
-            # model.layers.26.block_sparse_moe.experts.13.w3.weight, shape = torch.Size([4096, 4096])
-            if isinstance(self.config.num_local_experts, list):
-                if OPEN_DEBUG:
-                    print(f"{AbabForCausalLM.__name__}.[MOE] experts number not same, num_local_experts={self.config.num_local_experts}")
-                expert_params_mapping = [
-                    # (param_name, weight_name, expert_id)
-                    # ("ws" if weight_name in ["w1", "w3"] else "w2s",
-                    ("w13_weight" if weight_name in ["w1", "w3"] else "w2_weight",
-                     f"experts.{expert_id}.{weight_name}.weight", expert_id)
-                    for expert_id in range(max(self.config.num_local_experts))
-                    for weight_name in ["w1", "w2", "w3"]
-                ]
-            else:
-                if OPEN_DEBUG:
-                    print(f"{AbabForCausalLM.__name__}.[MOE] experts number not change accross layers, num_local_experts={self.config.num_local_experts}")
-                expert_params_mapping = [
-                    ("w13_scale" if weight_name in ["w1", "w3"] else "w2_scale",
-                    f"experts.{expert_id}.{weight_name}.weight_scale", expert_id)
-                    for expert_id in range(self.config.num_local_experts)
-                    for weight_name in ["w1", "w2", "w3"]
-                ] + [
-                    # (param_name, weight_name, expert_id)
-                    # # ("ws" if weight_name in ["w1", "w3"] else "w2s",
-                    ("w13_weight" if weight_name in ["w1", "w3"] else "w2_weight",
-                    f"experts.{expert_id}.{weight_name}.weight", expert_id)
-                    for expert_id in range(self.config.num_local_experts)
-                    for weight_name in ["w1", "w2", "w3"]
-                ]
-            for param_name, weight_name, expert_id in expert_params_mapping:
-                if weight_name not in name:
-                    continue
-                origin_name = name
-                # 修复：保留正确的路径结构，只替换最后的权重名称部分
-                param_path = name.rsplit(".", 1)[0]  # 获取路径部分，去掉最后的权重名
-                param_path = param_path.replace(f"experts.{expert_id}", "experts")  # 移除专家ID
-                if param_path.startswith("model."):
-                    param_path = param_path[len("model."):]  # 移除"model."前缀
-                new_name = f"{param_path}.{param_name}"
+        """加载模型权重。
+        
+        Args:
+            weights: 包含权重名称和张量的可迭代对象
+        """
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        
+        # 定义权重加载器映射
+        weight_loaders = {
+            # 稀疏MoE权重加载器
+            "block_sparse_moe.experts": self._load_sparse_moe_weight,
+            # 共享MLP权重加载器
+            "shared_mlp": self._load_shared_mlp_weight,
+            # Flash注意力权重加载器
+            "self_attn": self._load_flash_attn_weight,
+            # 层归一化权重加载器
+            "norm": self._load_layer_norm_weight,
+        }
+        
+        # 默认权重加载器
+        default_loader = self._load_basic_weight
+        
+        for name, loaded_weight in weights:
+            # 移除可能的"model."前缀
+            param_name = name
+            if name.startswith("model."):
+                param_name = name[len("model."):]
                 
-                if OPEN_DEBUG:
-                    print(f"{AbabForCausalLM.__name__}.[MOE] load weights param_name = {param_name}, weight_name = {weight_name}, expert_id = {expert_id}")
-                    print(f"{AbabForCausalLM.__name__}.[MOE] name = {origin_name} -> {new_name}, weight_name = {weight_name}, param_name = {param_name}")
-                
-                if new_name not in params_dict:
-                    if OPEN_DEBUG:
-                        print(f"{AbabForCausalLM.__name__}.[MOE] param {new_name} not found, skipping")
-                    continue
-                    
-                param = params_dict[new_name]
-                weight_loader = param.weight_loader
-                if OPEN_DEBUG:
-                    print(f"{AbabForCausalLM.__name__}.[MOE] param.shape = {param.data.shape}")
-                    print(f"{AbabForCausalLM.__name__}.[MOE] loaded_weight.shape = {loaded_weight.shape}")
-                    print(f"{AbabForCausalLM.__name__}.[MOE] weight_loader = {weight_loader}")
-                weight_loader = weight_loader_with_alias(new_name)(weight_loader)
-                weight_loader(param,
-                              loaded_weight,
-                              weight_name,
-                              expert_id=expert_id)
-                break
+            # 根据权重名称选择合适的加载器
+            for key, loader in weight_loaders.items():
+                if key in param_name:
+                    loader(name, loaded_weight)
+                    break
             else:
-                if OPEN_DEBUG:
-                    print(f"{AbabForCausalLM.__name__}.[MOE] load weight name = {name}")
-                # 处理权重名称前缀，移除 "model." 前缀
-                param_name = name
-                if name.startswith("model."):
-                    param_name = name[len("model."):]
-                    
-                if param_name not in params_dict:
-                    if OPEN_DEBUG:
-                        print(f"{AbabForCausalLM.__name__}.[MOE] param {param_name} not found, skipping")
-                    return
-                    
-                param = params_dict[param_name]
-                if OPEN_DEBUG:
-                    print(f"{AbabForCausalLM.__name__}.[MOE] param.shape = {param.data.shape}")
-                    print(f"{AbabForCausalLM.__name__}.[MOE] loaded_weight.shape = {loaded_weight.shape}")
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader = weight_loader_with_alias(param_name)(weight_loader)
-                if OPEN_DEBUG:
-                    print(f"{AbabForCausalLM.__name__}.[MOE] weight_loader = {weight_loader}")
-                weight_loader(param, loaded_weight)
+                # 如果没有匹配的特殊加载器，使用默认加载器
+                default_loader(name, loaded_weight)
+    
+    def _load_sparse_moe_weight(self, name: str, loaded_weight: torch.Tensor) -> None:
+        """加载稀疏MoE权重。
+        
+        处理形如：
+        - model.layers.26.block_sparse_moe.experts.13.w1.weight
+        - model.layers.26.block_sparse_moe.experts.13.w2.weight
+        - model.layers.26.block_sparse_moe.experts.13.w3.weight
+        的权重
+        """
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        OPEN_DEBUG = False
+        
+        # 提取专家ID和权重类型
+        match = re.search(r'experts\.(\d+)\.([^.]+)', name)
+        if not match:
             return
-
-        def is_shared_mlp_weight(name: str) -> bool:
-            if "shared_mlp" in name:
-                if name.endswith(".bias"):
-                    return False
-                return True
-
-        def load_shared_mlp_weight(name: str, loaded_weight: torch.Tensor) -> None:
-            # AbabForCausalLM.param.name = model.layers.0.shared_mlp.gate_up_proj.weight, param.shape = torch.Size([512, 4096])
-            # AbabForCausalLM.param.name = model.layers.0.shared_mlp.down_proj.weight, param.shape = torch.Size([4096, 256])
+            
+        expert_id = int(match.group(1))
+        weight_name = match.group(2)
+        
+        # 映射权重名称
+        param_mapping = {
+            "w1": "w13_weight",
+            "w3": "w13_weight",
+            "w2": "w2_weight",
+        }
+        
+        param_name = param_mapping.get(weight_name)
+        if not param_name:
+            return
+            
+        # 构建新的参数名称
+        param_path = name.rsplit(".", 1)[0]  # 获取路径部分，去掉最后的权重名
+        param_path = param_path.replace(f"experts.{expert_id}", "experts")  # 移除专家ID
+        if param_path.startswith("model."):
+            param_path = param_path[len("model."):]  # 移除"model."前缀
+        new_name = f"{param_path}.{param_name}"
+        
+        if OPEN_DEBUG:
+            print(f"{self.__class__.__name__}.[MOE] load weights param_name = {param_name}, weight_name = {weight_name}, expert_id = {expert_id}")
+            print(f"{self.__class__.__name__}.[MOE] name = {name} -> {new_name}")
+        
+        if new_name not in params_dict:
+            if OPEN_DEBUG:
+                print(f"{self.__class__.__name__}.[MOE] param {new_name} not found, skipping")
+            return
+            
+        param = params_dict[new_name]
+        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+        weight_loader(param, loaded_weight, weight_name, expert_id=expert_id)
+    
+    def _load_shared_mlp_weight(self, name: str, loaded_weight: torch.Tensor) -> None:
+        """加载共享MLP权重。
+        
+        处理形如：
+        - model.layers.0.shared_mlp.gate_up_proj.weight
+        - model.layers.0.shared_mlp.down_proj.weight
+        的权重
+        """
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        OPEN_DEBUG = False
+        
+        processed_name = name
+        if name.startswith("model."):
+            processed_name = name[len("model."):]
+        
+        if not hasattr(self, 'CONCAT_FFN'):
+            self.CONCAT_FFN = False  # 默认值
+        
+        # 映射权重名称
+        if not self.CONCAT_FFN:
+            if "gate_proj" in processed_name:
+                processed_name = processed_name.replace("gate_proj", "w1", 1)
+            elif "up_proj" in processed_name:
+                processed_name = processed_name.replace("up_proj", "w3", 1)
+            elif "down_proj" in processed_name:
+                processed_name = processed_name.replace("down_proj", "w2", 1)
+        else:
+            if "gate_proj" in processed_name:
+                processed_name = processed_name.replace("gate_proj", "gate_up_proj", 1)
+                loaded_shard_id = 0
+            elif "up_proj" in processed_name:
+                processed_name = processed_name.replace("up_proj", "gate_up_proj", 1)
+                loaded_shard_id = 1
+        
+        if OPEN_DEBUG:
+            print(f"{self.__class__.__name__}.[SHARED] load weights name = {processed_name}")
+        
+        # 检查参数是否存在
+        if processed_name not in params_dict:
+            if OPEN_DEBUG:
+                print(f"{self.__class__.__name__}.[SHARED] param {processed_name} not found, skipping")
+            return
+        
+        param = params_dict[processed_name]
+        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+        weight_loader(param, loaded_weight)
+    
+    def _load_flash_attn_weight(self, name: str, loaded_weight: torch.Tensor) -> None:
+        """加载Flash注意力权重。
+        
+        处理形如：
+        - model.layers.15.self_attn.k_proj.weight
+        - model.layers.15.self_attn.o_proj.weight
+        - model.layers.15.self_attn.q_proj.weight
+        - model.layers.15.self_attn.v_proj.weight
+        的权重
+        """
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        OPEN_DEBUG = False
+        
+        # 映射权重名称
+        weight_mapping = {
+            "q_proj": ("qkv_proj", "q"),
+            "k_proj": ("qkv_proj", "k"),
+            "v_proj": ("qkv_proj", "v"),
+            "o_proj": ("out_proj", None),
+        }
+        
+        for weight_name, (param_name, shard_id) in weight_mapping.items():
+            if weight_name not in name:
+                continue
+                
+            # 处理权重名称前缀，移除 "model." 前缀
             processed_name = name
             if name.startswith("model."):
                 processed_name = name[len("model."):]
-            
-            if not hasattr(self, 'CONCAT_FFN'):
-                self.CONCAT_FFN = False  # 默认值
-            
-            if not self.CONCAT_FFN:
-                if "gate_proj" in processed_name:
-                    processed_name = processed_name.replace("gate_proj", "w1", 1)
-                elif "up_proj" in processed_name:
-                    processed_name = processed_name.replace("up_proj", "w3", 1)
-                elif "down_proj" in processed_name:
-                    processed_name = processed_name.replace("down_proj", "w2", 1)
-            else:
-                if "gate_proj" in processed_name:
-                    processed_name = processed_name.replace("gate_proj", "gate_up_proj", 1)
-                    loaded_shard_id = 0
-                elif "up_proj" in processed_name:
-                    processed_name = processed_name.replace("up_proj", "gate_up_proj", 1)
-                    loaded_shard_id = 1
+                
+            # 替换权重名称部分
+            processed_name = processed_name.replace(weight_name, param_name)
             
             if OPEN_DEBUG:
-                print(f"{AbabForCausalLM.__name__}.[SHARED] load weights name = {processed_name}")
+                print(f"{self.__class__.__name__}.[FLASH] load weights param_name = {param_name}, weight_name = {weight_name}, shard_id = {shard_id}")
+                print(f"{self.__class__.__name__}.[FLASH] name = {name} -> {processed_name}")
             
             # 检查参数是否存在
             if processed_name not in params_dict:
                 if OPEN_DEBUG:
-                    print(f"{AbabForCausalLM.__name__}.[SHARED] param {processed_name} not found, skipping")
-                return
-            
+                    print(f"{self.__class__.__name__}.[FLASH] param {processed_name} not found, skipping")
+                continue
+                
             param = params_dict[processed_name]
-            if OPEN_DEBUG:
-                print(f"{AbabForCausalLM.__name__}.[SHARED] param.shape = {param.data.shape}")
-                print(f"{AbabForCausalLM.__name__}.[SHARED] loaded_weight.shape = {loaded_weight.shape}")
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader = weight_loader_with_alias(processed_name)(weight_loader)
-            if OPEN_DEBUG:
-                print(f"{AbabForCausalLM.__name__}.[SHARED] weight_loader = {weight_loader}")
-            if not self.CONCAT_FFN:
-                weight_loader(param, loaded_weight)
-            else:
-                if "gate_up_proj" in processed_name:
-                    weight_loader(param, loaded_weight, loaded_shard_id)
-                elif "down_proj" in processed_name:
-                    weight_loader(param, loaded_weight)
-                else:
-                    if OPEN_DEBUG:
-                        print(f"{AbabForCausalLM.__name__}.[SHARED] Unexpected MLP weight: {processed_name}")
-            return
-
-        def is_mha_weight(name: str) -> bool:
-            if "self_attn" in name:
-                if name.endswith(".bias"):
-                    return False
-                return True
-            return False
-
-        def load_linear_attn_weight(name: str, loaded_weight: torch.Tensor) -> None:
-            # model.layers.13.self_attn.norm.weight, shape = torch.Size([4096])
-            # model.layers.13.self_attn.out_proj.weight, shape = torch.Size([4096, 4096])
-            # model.layers.13.self_attn.output_gate.weight, shape = torch.Size([4096, 4096])
-            # model.layers.13.self_attn.qkv_proj.weight, shape = torch.Size([12288, 4096])
-            linear_mha_params_mapping = [
-                ("qkv_proj", "qkv_proj", 0),
-                ("output_gate", "output_gate", 0),
-                ("out_proj", "out_proj", 1),  # shard no use, cause out-proj and output-gate are not fuse.
-            ]
-            if OPEN_DEBUG:
-                print(f"{AbabForCausalLM.__name__}.[LINEAR] load weights name = {name}")
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
             
-            # 处理权重名称前缀，移除 "model." 前缀
-            param_name = name
-            if name.startswith("model."):
-                param_name = name[len("model."):]
-            
-            # 尝试获取参数，如果不存在则记录并跳过
-            if param_name not in params_dict:
-                if OPEN_DEBUG:
-                    print(f"{AbabForCausalLM.__name__}.[LINEAR] param {param_name} not found, skipping")
-                return
-                
-            param = params_dict[param_name]
-            if OPEN_DEBUG:
-                print(f"{AbabForCausalLM.__name__}.[LINEAR] param.shape = {param.data.shape}")
-                print(f"{AbabForCausalLM.__name__}.[LINEAR] loaded_weight.shape = {loaded_weight.shape}")
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader = weight_loader_with_alias(param_name)(weight_loader)
-            if OPEN_DEBUG:
-                print(f"{AbabForCausalLM.__name__}.[LINEAR] weight_loader = {weight_loader}")
-            weight_loader(param, loaded_weight)
-            return
-
-        def load_flash_attn_weight(name: str, loaded_weight: torch.Tensor) -> None:
-            # model.layers.15.self_attn.k_proj.weight, shape = torch.Size([4096, 4096])
-            # model.layers.15.self_attn.o_proj.weight, shape = torch.Size([4096, 4096])
-            # model.layers.15.self_attn.q_proj.weight, shape = torch.Size([4096, 4096])
-            # model.layers.15.self_attn.v_proj.weight, shape = torch.Size([4096, 4096])
-            flash_mha_params_mapping = [
-                # (param_name, weight_name, shard_id)
-                ("qkv_proj", "q_proj", "q"),
-                ("qkv_proj", "k_proj", "k"),
-                ("qkv_proj", "v_proj", "v"),
-                ("gate_up_proj", "gate_proj", 0),
-                ("gate_up_proj", "up_proj", 1),
-            ]
-            for (param_name, weight_name, shard_id) in flash_mha_params_mapping:
-                if weight_name not in name:
-                    continue
-                origin_name = name
-                
-                # 处理权重名称前缀，移除 "model." 前缀
-                processed_name = name
-                if name.startswith("model."):
-                    processed_name = name[len("model."):]
-                    
-                # 替换权重名称部分
-                processed_name = processed_name.replace(weight_name, param_name)
-                
-                if OPEN_DEBUG:
-                    print(f"{AbabForCausalLM.__name__}.[FLASH] load weights param_name = {param_name}, weight_name = {weight_name}, shard_id = {shard_id}")
-                    print(f"{AbabForCausalLM.__name__}.[FLASH] name = {origin_name} -> {processed_name}, weight_name = {weight_name}, param_name = {param_name}")
-                
-                # 检查参数是否存在
-                if processed_name not in params_dict:
-                    if OPEN_DEBUG:
-                        print(f"{AbabForCausalLM.__name__}.[FLASH] param {processed_name} not found, skipping")
-                    continue
-                    
-                param = params_dict[processed_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader = weight_loader_with_alias(processed_name)(weight_loader)
-                if OPEN_DEBUG:
-                    print(f"{AbabForCausalLM.__name__}.[FLASH] param.shape = {param.data.shape}")
-                    print(f"{AbabForCausalLM.__name__}.[FLASH] loaded_weight.shape = {loaded_weight.shape}")
-                    print(f"{AbabForCausalLM.__name__}.[FLASH] weight_loader = {weight_loader}")
+            if shard_id is not None:
                 weight_loader(param, loaded_weight, shard_id)
-                break
             else:
-                if OPEN_DEBUG:
-                    print(f"{AbabForCausalLM.__name__}.[FLASH] load weight name = {name}")
-                    
-                # 处理权重名称前缀，移除 "model." 前缀
-                param_name = name
-                if name.startswith("model."):
-                    param_name = name[len("model."):]
-                
-                # 检查参数是否存在
-                if param_name not in params_dict:
-                    if OPEN_DEBUG:
-                        print(f"{AbabForCausalLM.__name__}.[FLASH] param {param_name} not found, skipping")
-                    return
-                    
-                param = params_dict[param_name]
-                if OPEN_DEBUG:
-                    print(f"{AbabForCausalLM.__name__}.[FLASH] param.shape = {param.data.shape}")
-                    print(f"{AbabForCausalLM.__name__}.[FLASH] loaded_weight.shape = {loaded_weight.shape}")
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader = weight_loader_with_alias(param_name)(weight_loader)
-                if OPEN_DEBUG:
-                    print(f"{AbabForCausalLM.__name__}.[FLASH] weight_loader = {weight_loader}")
                 weight_loader(param, loaded_weight)
-            return
-
-        def is_layer_norm_weight(name: str) -> bool:
-            # 处理权重名称前缀，移除 "model." 前缀用于检查
-            check_name = name
-            if name.startswith("model."):
-                check_name = name[len("model."):]
-            
-            if "norm" in check_name:
-                if check_name.endswith(".bias") or check_name not in params_dict:
-                    return False
-                return True
-            return False
-
-        def load_layer_norm_weight(name: str, loaded_weight: torch.Tensor) -> None:
-            # model.layers.21.input_layernorm.weight, shape = torch.Size([4096])
-            # model.layers.21.post_attention_layernorm.weight, shape = torch.Size([4096])
+            break
+    
+    def _load_layer_norm_weight(self, name: str, loaded_weight: torch.Tensor) -> None:
+        """加载层归一化权重。
+        
+        处理形如：
+        - model.layers.21.input_layernorm.weight
+        - model.layers.21.post_attention_layernorm.weight
+        的权重
+        """
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        OPEN_DEBUG = False
+        
+        # 处理权重名称前缀，移除 "model." 前缀
+        param_name = name
+        if name.startswith("model."):
+            param_name = name[len("model."):]
+        
+        # 尝试获取参数，如果不存在则跳过
+        if param_name not in params_dict:
             if OPEN_DEBUG:
-                print(f"{AbabForCausalLM.__name__}.[NORM] load weight name = {name}")
+                print(f"{self.__class__.__name__}.[NORM] param {param_name} not found, skipping")
+            return
             
-            # 处理权重名称前缀，移除 "model." 前缀
-            param_name = name
-            if name.startswith("model."):
-                param_name = name[len("model."):]
-            
-            # 尝试获取参数，如果不存在则记录并跳过
+        param = params_dict[param_name]
+        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+        weight_loader(param, loaded_weight)
+    
+    def _load_basic_weight(self, name: str, loaded_weight: torch.Tensor) -> None:
+        """加载基本权重。
+        
+        处理所有其他类型的权重。
+        """
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        OPEN_DEBUG = False
+        
+        # 处理权重名称前缀，移除 "model." 前缀
+        param_name = name
+        if name.startswith("model."):
+            param_name = name[len("model."):]
+        
+        # 特殊处理词汇嵌入权重
+        if "embed_tokens.weight" in param_name or "lm_head.weight" in param_name:
             if param_name not in params_dict:
                 if OPEN_DEBUG:
-                    print(f"{AbabForCausalLM.__name__}.[NORM] param {param_name} not found, skipping")
+                    print(f"{self.__class__.__name__}.[BASIC] param {param_name} not found, skipping")
                 return
                 
             param = params_dict[param_name]
-            if OPEN_DEBUG:
-                print(f"{AbabForCausalLM.__name__}.[NORM] param.shape = {param.data.shape}")
-                print(f"{AbabForCausalLM.__name__}.[NORM] loaded_weight.shape = {loaded_weight.shape}")
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader = weight_loader_with_alias(param_name)(weight_loader)
-            if OPEN_DEBUG:
-                print(f"{AbabForCausalLM.__name__}.[NORM] weight_loader = {weight_loader}")
-            weight_loader(param, loaded_weight)
-            return
-
-        def load_basic_weight(name: str, loaded_weight: torch.Tensor) -> None:
-            if OPEN_DEBUG:
-                print(f"{AbabForCausalLM.__name__}.[BASIC] load weight name = {name}")
             
-            # 处理权重名称前缀，移除 "model." 前缀
-            param_name = name
-            if name.startswith("model."):
-                param_name = name[len("model."):]
-            
-            # 特殊处理词汇嵌入权重
-            if "embed_tokens.weight" in param_name or "lm_head.weight" in param_name:
-                if OPEN_DEBUG:
-                    print(f"{AbabForCausalLM.__name__}.[BASIC] 特殊处理词汇嵌入权重: {param_name}")
-                
-                # 检查参数是否存在
-                if param_name not in params_dict:
-                    if OPEN_DEBUG:
-                        print(f"{AbabForCausalLM.__name__}.[BASIC] param {param_name} not found, skipping")
-                    return
-                    
-                param = params_dict[param_name]
-                if OPEN_DEBUG:
-                    print(f"{AbabForCausalLM.__name__}.[BASIC] param.shape = {param.data.shape}")
-                    print(f"{AbabForCausalLM.__name__}.[BASIC] loaded_weight.shape = {loaded_weight.shape}")
-                
-                # 使用自定义加载方法处理词汇嵌入权重
-                if param.data.shape[0] != loaded_weight.shape[0]:
-                    if OPEN_DEBUG:
-                        print(f"{AbabForCausalLM.__name__}.[BASIC] 词汇嵌入尺寸不匹配，进行特殊处理")
-                    
-                    # 确保我们只复制有效的部分
-                    min_vocab_size = min(param.data.shape[0], loaded_weight.shape[0])
-                    param.data[:min_vocab_size].copy_(loaded_weight[:min_vocab_size])
-                    return
-            
-            # 尝试获取参数，如果不存在则记录并跳过
-            if param_name not in params_dict:
-                if OPEN_DEBUG:
-                    print(f"{AbabForCausalLM.__name__}.[BASIC] param {param_name} not found, skipping")
+            # 使用自定义加载方法处理词汇嵌入权重
+            if param.data.shape[0] != loaded_weight.shape[0]:
+                # 确保我们只复制有效的部分
+                min_vocab_size = min(param.data.shape[0], loaded_weight.shape[0])
+                param.data[:min_vocab_size].copy_(loaded_weight[:min_vocab_size])
                 return
-                
-            param = params_dict[param_name]
+        
+        # 尝试获取参数，如果不存在则跳过
+        if param_name not in params_dict:
             if OPEN_DEBUG:
-                print(f"{AbabForCausalLM.__name__}.[BASIC] param.shape = {param.data.shape}")
-                print(f"{AbabForCausalLM.__name__}.[BASIC] loaded_weight.shape = {loaded_weight.shape}")
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader = weight_loader_with_alias(param_name)(weight_loader)
-            if OPEN_DEBUG:
-                print(f"{AbabForCausalLM.__name__}.[BASIC] weight_loader = {weight_loader}")
-            weight_loader(param, loaded_weight)
+                print(f"{self.__class__.__name__}.[BASIC] param {param_name} not found, skipping")
             return
-
-        if OPEN_DEBUG:
-            print(f"{AbabForCausalLM.__name__}.now .. loop weights and load")
-        for name, loaded_weight in weights:
-            weight_at_layer = which_layer(name)
-            layer_attn_type = "linear" if is_linear_attn_layer(weight_at_layer) else "flash"
-            if OPEN_DEBUG:
-                print(f"{AbabForCausalLM.__name__}.----------------- layer = {weight_at_layer} | {layer_attn_type} -----------------")
-                print(f"{AbabForCausalLM.__name__}.loaded hf-weight = {name}, shape = {loaded_weight.shape if loaded_weight is not None else None}")
-
-            # 处理权重名称前缀，移除 "model." 前缀用于检查
-            check_name = name
-            if name.startswith("model."):
-                check_name = name[len("model."):]
-
-            if is_layer_norm_weight(check_name):
-                load_layer_norm_weight(name, loaded_weight)
-                continue
-            if is_mha_weight(check_name):
-                if is_linear_attn_layer(weight_at_layer):
-                    load_linear_attn_weight(name, loaded_weight)
-                else:
-                    load_flash_attn_weight(name, loaded_weight)
-                continue
-            if is_moe_weight(check_name):
-                load_sparse_moe_weight(name, loaded_weight)
-                continue
-            if is_shared_mlp_weight(check_name):
-                load_shared_mlp_weight(name, loaded_weight)
-                continue
-
-            if "rotary_emb.inv_freq" in name:
-                if OPEN_DEBUG:
-                    print(f"{AbabForCausalLM.__name__}.[ROTARY] inverse frequency, skip load")
-                continue
-
-            load_basic_weight(name, loaded_weight)
-
-        if OPEN_DEBUG:
-            print(f"{AbabForCausalLM.__name__}.load_weights ends.")
-        return
+            
+        param = params_dict[param_name]
+        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+        weight_loader(param, loaded_weight)
 
