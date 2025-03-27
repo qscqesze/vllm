@@ -3,15 +3,19 @@
 import copy
 import math
 import re
-from typing import Dict, Iterable, List, Optional, Tuple, Union, Set
-
+from typing import Dict, Iterable, List, Optional, Tuple, Union, Set, Mapping, Any
+from collections.abc import Sequence
 import torch
 import torch.distributed
 import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from transformers.configuration_utils import PretrainedConfig
-
+from transformers.tokenization_utils import PreTrainedTokenizer
+from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
+from vllm.multimodal.parse import MultiModalDataItems
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
@@ -30,6 +34,9 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate, PromptUpdateDetails)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -59,6 +66,10 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from .utils import AutoWeightsLoader
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
+from vllm.multimodal.processing import BaseMultiModalProcessor, ProcessingCache
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate)
 
 def replace_weight_name(name: str,
                         key: str = None,
@@ -970,107 +981,183 @@ class MiniMaxVL01Model(nn.Module):
             hidden_states = self.norm(hidden_states)
 
         return hidden_states
-from collections.abc import Collection, Mapping, Sequence
-from collections.abc import Set as AbstractSet
-from functools import lru_cache, partial
-from typing import Callable, List, Literal, Optional, TypedDict, Union
-import unicodedata
 
-@lru_cache(maxsize=1)
-def _get_tokenizer_without_image_pad(
-        tokenizer: PreTrainedTokenizer) -> PreTrainedTokenizer:
-    """
-    The logic of adding image pad tokens should only be applied in
-    :class:`QwenVLProcessor`, so they are patched out here.
 
-    The definition of the wrapped tokenizer can be found here:
-    https://huggingface.co/Qwen/Qwen-VL/blob/main/tokenization_qwen.py
-    """
-    new_tokenizer = copy.deepcopy(tokenizer)
 
-    class TokenizerWithoutImagePad(tokenizer.__class__):  # type: ignore
-
-        def tokenize(
-            self,
-            text: str,
-            allowed_special: Union[AbstractSet[str], str] = "all",
-            disallowed_special: Union[Collection[str], str] = (),
-            **kwargs,
-        ) -> list[Union[bytes, str]]:
-            text = unicodedata.normalize("NFC", text)
-
-            return [
-                self.decoder[t] for t in self.tokenizer.encode(
-                    text,
-                    allowed_special=allowed_special,
-                    disallowed_special=disallowed_special,
-                )
-            ]
-
-        def _decode(
-            self,
-            token_ids: Union[int, List[int]],
-            skip_special_tokens: bool = False,
-            errors: Optional[str] = None,
-            **kwargs,
-        ) -> str:
-            if isinstance(token_ids, int):
-                token_ids = [token_ids]
-
-            return self.tokenizer.decode(
-                token_ids,
-                errors=errors or self.errors,
-            )
-
-    TokenizerWithoutImagePad.__name__ = \
-        f"{tokenizer.__class__.__name__}WithoutImagePad"
-
-    new_tokenizer.__class__ = TokenizerWithoutImagePad
-    return new_tokenizer
-
-from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate, PromptUpdateDetails)
-from transformers import (BatchFeature, PretrainedConfig, PreTrainedTokenizer,
-                          TensorType)
 class MinimaxVLProcessingInfo(BaseProcessingInfo):
+    """MiniMax VL 模型的处理信息类，提供模型处理所需的配置和方法"""
+
     def get_tokenizer(self) -> PreTrainedTokenizer:
+        """获取模型的分词器"""
         tokenizer = self.ctx.tokenizer
         assert isinstance(tokenizer, PreTrainedTokenizer)
+        return tokenizer
 
-        return _get_tokenizer_without_image_pad(tokenizer)
-
-    def get_hf_processor(self, **kwargs: object) -> LlavaMultiModalProcessor:
+    def get_hf_processor(self, **kwargs: object) -> Any:
+        """获取或初始化 HuggingFace 处理器"""
         return self.ctx.init_processor(
-            LlavaMultiModalProcessor,
+            self.ctx.processor_class,
             config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),
             **kwargs,
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None}
+        """获取支持的多模态限制"""
+        return {"image": None}  # 不限制图像数量
 
     def get_mm_max_tokens_per_item(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
+        """获取每个多模态项目的最大标记数"""
         return {"image": self.get_num_image_tokens()}
 
     def get_num_image_tokens(self) -> int:
+        """获取每个图像需要的标记数量"""
         hf_config = self.get_hf_config()
+        
+        # 如果配置中明确指定了图像标记数量，则使用该值
+        if hasattr(hf_config, "num_image_tokens"):
+            return hf_config.num_image_tokens
+            
+        # 否则，根据视觉配置计算
         vision_config = hf_config.visual
-
+        
+        # 计算图像标记数量（类似于 Qwen-VL 的计算方式）
         image_size = vision_config["image_size"]
         patch_size = vision_config["patch_size"]
-        grid_length = image_size // patch_size // 2
-        return grid_length * grid_length
+        
+        # 假设每个图像被分成 patch_size x patch_size 的块
+        # 然后每个块对应一个标记
+        grid_size = (image_size // patch_size) ** 2
+        
+        # 一些模型可能会进一步压缩标记数量
+        compression_factor = getattr(vision_config, "compression_factor", 1)
+        
+        return grid_size // compression_factor
 
-# 注册自定义处理器
-@MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor,
+
+class MinimaxMultiModalProcessor(BaseMultiModalProcessor[MinimaxVLProcessingInfo]):
+    """MiniMax VL 模型的多模态处理器，处理图像和文本的融合"""
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # 处理图像标记，将图像标记替换为简单的占位符
+        # 类似于 Qwen-VL 的处理方式
+        prompt, num_matched_images = re.subn(
+            r"<image>.*?</image>",
+            r"<image></image>",
+            prompt,
+        )
+
+        image_data = mm_data.get("images")
+        if image_data is not None:
+            assert isinstance(image_data, list)
+            num_images = len(image_data)
+            assert num_matched_images == num_images, f"找到 {num_matched_images} 个图像标记，但提供了 {num_images} 张图像"
+
+        return super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+
+    def _hf_processor_applies_updates(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> bool:
+        # 指示处理器是否自动应用更新
+        return False
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        # 定义多模态字段配置
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            image_embeds=MultiModalFieldConfig.batched("image"),
+        )
+
+    def _get_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> Sequence[PromptUpdate]:
+        # 获取处理器和标记器
+        tokenizer = self.info.get_tokenizer()
+        config = self.info.get_hf_config()
+        
+        # 获取图像标记的ID
+        image_token_id = config.image_token_id
+        
+        # 获取每个图像需要的标记数量
+        num_image_tokens = self.info.get_num_image_tokens()
+        
+        # 创建图像标记序列
+        image_tokens = [image_token_id] * num_image_tokens
+        
+        # 返回提示更新
+        return [
+            PromptReplacement(
+                modality="image",
+                target=[image_token_id],  # 目标是单个图像标记
+                replacement=PromptUpdateDetails(
+                    full=image_tokens,  # 完整替换为多个图像标记
+                    features=image_tokens,  # 特征部分
+                ),
+            )
+        ]
+
+
+class MinimaxDummyInputsBuilder(BaseDummyInputsBuilder[MinimaxVLProcessingInfo]):
+    """为 MiniMax VL 模型构建虚拟输入的构建器"""
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        # 获取配置
+        hf_config = self.info.get_hf_config()
+        vision_config = hf_config.visual
+        
+        # 获取图像尺寸
+        target_width = target_height = vision_config["image_size"]
+        num_images = mm_counts.get("image", 0)
+        
+        # 创建虚拟图像数据
+        mm_data = {
+            "image": self._get_dummy_images(
+                width=target_width,
+                height=target_height,
+                num_images=num_images
+            )
+        }
+        
+        # 创建带有图像标记的提示文本
+        prompt_text = "".join(f"图片 {i}: <image></image>\n" for i in range(1, num_images + 1))
+        
+        return ProcessorInputs(
+            prompt_text=prompt_text,
+            mm_data=mm_data,
+        )
+
+
+# 注册多模态处理器
+@MULTIMODAL_REGISTRY.register_processor(MinimaxMultiModalProcessor,
                                        info=MinimaxVLProcessingInfo,
-                                       dummy_inputs=LlavaDummyInputsBuilder)
+                                       dummy_inputs=MinimaxDummyInputsBuilder)
 class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     """MiniMaxText01 model with multimodal capabilities."""
     
