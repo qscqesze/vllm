@@ -992,6 +992,9 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             prefix=prefix
         )
         
+        # 添加model属性，指向自身
+        self.model = self
+        
         # 初始化多模态组件
         # 检查是否有视觉配置，如果没有则跳过视觉模块初始化
         self.has_vision_tower = hasattr(config, "vision_config")
@@ -1203,7 +1206,6 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             return sampler(logits, sampling_metadata)
         return None
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
