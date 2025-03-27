@@ -979,6 +979,25 @@ class MinimaxLlavaProcessingInfo(LlavaProcessingInfo):
         """重写获取HF配置的方法 接受LlavaConfig类型"""
         from transformers import LlavaConfig
         return self.ctx.get_hf_config(LlavaConfig)
+    
+    def get_image_size_with_most_features(self):
+        """重写获取图像尺寸的方法"""
+        # 获取配置
+        hf_config = self.get_hf_config()
+        
+        # 使用配置中的图像尺寸或默认值
+        image_size = getattr(hf_config.vision_config, "image_size", 336)
+        return image_size, image_size
+    
+    def get_max_image_tokens(self):
+        """重写获取最大图像标记数的方法"""
+        # 获取图像尺寸
+        width, height = self.get_image_size_with_most_features()
+        
+        # 计算图像标记数
+        # 这里使用简单的计算方法，可能需要根据实际模型调整
+        patch_size = getattr(self.get_hf_config().vision_config, "patch_size", 14)
+        return (width // patch_size) * (height // patch_size)
 
 # 更新注册
 @MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor,
