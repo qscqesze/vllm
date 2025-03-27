@@ -971,11 +971,24 @@ class MiniMaxVL01Model(nn.Module):
 
         return hidden_states
 
+# 创建自定义的处理信息类
+class MinimaxLlavaProcessingInfo(LlavaProcessingInfo):
+    """为Minimax模型定制的LLaVA处理信息类"""
+    
+    def get_hf_config(self):
+        """重写获取HF配置的方法 接受LlavaConfig类型"""
+        from transformers import LlavaConfig
+        return self.ctx.get_hf_config(LlavaConfig)
+
+# 更新注册
 @MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor,
-                                       info=LlavaProcessingInfo,
+                                       info=MinimaxLlavaProcessingInfo,
                                        dummy_inputs=LlavaDummyInputsBuilder)
 class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     """MiniMaxText01 model with multimodal capabilities."""
+    
+    # 添加一个类变量来指定正确的配置类型
+    _mm_config_class = "LlavaConfig"
     
     def __init__(
         self,
