@@ -1203,19 +1203,7 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
             return sampler(logits, sampling_metadata)
         return None
 
-    def load_weights(self,
-                     weights: Iterable[Tuple[str, torch.Tensor]]) -> None:
-        """加载模型权重。
-        
-        Args:
-            weights: 包含权重名称和张量的可迭代对象
-        """
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        
-        # 创建自动权重加载器
-        weight_loader = AutoWeightsLoader(self)
-        
-        # 加载所有权重
-        for name, loaded_weight in weights:
-            weight_loader.load_weights(name, loaded_weight)
-
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]):
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)
