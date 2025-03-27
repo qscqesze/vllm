@@ -1362,3 +1362,21 @@ class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     def get_dummy_inputs_builder(cls, ctx):
         """获取测试输入构建器"""
         return MinimaxVLDummyInputsBuilder(ctx)
+    
+    # 添加权重加载方法
+    def load_weights(self, weights):
+        """加载模型权重"""
+        # 使用AutoWeightsLoader加载权重
+        loader = AutoWeightsLoader(self, default_weight_loader)
+        return loader.load_weights(weights)
+    
+    # 添加模型类型识别方法
+    @staticmethod
+    def from_config(config, **kwargs):
+        """从配置创建模型"""
+        return AbabForCausalLM(config, **kwargs)
+    
+    @staticmethod
+    def get_model_type():
+        """获取模型类型"""
+        return "minimax_vl_01"
