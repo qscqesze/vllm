@@ -1460,6 +1460,77 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal):
         
         return image_embeds
 
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
+        """自定义权重加载函数，处理权重路径映射问题"""
+        loaded_params = set()
+        
+        # 为不同部分分类权重
+        model_weights = []
+        lm_head_weights = []
+        vision_weights = []
+        projector_weights = []
+        
+        # 对权重进行分类
+        for name, weight in weights:
+            if name.startswith("lm_head"):
+                lm_head_weights.append((name, weight))
+            elif name.startswith("vision_tower"):
+                vision_weights.append((name, weight))
+            elif name.startswith("multi_modal_projector"):
+                projector_weights.append((name, weight))
+            else:
+                model_weights.append((name, weight))
+                
+        # 加载模型主体的权重
+        if model_weights:
+            loaded_params.update(self.model.load_weights(model_weights))
+        
+        # 加载lm_head的权重
+        if get_pp_group().is_last_rank and hasattr(self, 'lm_head'):
+            for name, loaded_weight in lm_head_weights:
+                param = self.lm_head.weight
+                weight_loader = getattr(param, "weight_loader", self.lm_head_weight_loader)
+                try:
+                    weight_loader(param, loaded_weight)
+                    loaded_params.add("lm_head.weight")
+                except Exception as e:
+                    if OPEN_DEBUG:
+                        print(f"Error loading lm_head.weight: {e}")
+                        print(f"Param shape: {param.shape}, Weight shape: {loaded_weight.shape}")
+                    raise
+        
+        # 加载视觉塔的权重
+        if self.has_vision_tower and hasattr(self, 'vision_tower'):
+            for name, weight in vision_weights:
+                # 去掉前缀
+                name = name.replace("vision_tower.", "")
+                # 尝试找到对应参数并加载
+                for param_name, param in self.vision_tower.named_parameters():
+                    if param_name == name:
+                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                        try:
+                            weight_loader(param, weight)
+                            loaded_params.add(f"vision_tower.{param_name}")
+                        except Exception as e:
+                            print(f"Error loading vision_tower.{param_name}: {e}")
+        
+        # 加载多模态投影器的权重
+        if self.has_vision_tower and hasattr(self, 'multi_modal_projector'):
+            for name, weight in projector_weights:
+                # 去掉前缀
+                name = name.replace("multi_modal_projector.", "")
+                # 尝试找到对应参数并加载
+                for param_name, param in self.multi_modal_projector.named_parameters():
+                    if param_name == name:
+                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                        try:
+                            weight_loader(param, weight)
+                            loaded_params.add(f"multi_modal_projector.{param_name}")
+                        except Exception as e:
+                            print(f"Error loading multi_modal_projector.{param_name}: {e}")
+        
+        return loaded_params
+
 # 重新添加必要的类
 class MinimaxVLLayerNorm(nn.Module):
     """视觉模型的标准化层"""
