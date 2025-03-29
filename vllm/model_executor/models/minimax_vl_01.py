@@ -13,7 +13,7 @@ from torch import nn
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from transformers.configuration_utils import PretrainedConfig
 from transformers.tokenization_utils import PreTrainedTokenizer
-from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
+from transformers import BatchFeature, PretrainedConfig, ProcessorMixin, AutoProcessor
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.attention import Attention, AttentionMetadata
@@ -63,6 +63,8 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
 from vllm.multimodal.parse import ImageSize
+from transformers import PretrainedConfig
+from vllm.inputs import InputProcessingContext
 
 def replace_weight_name(name: str,
                         key: str = None,
@@ -977,238 +979,76 @@ class MiniMaxVL01Model(nn.Module):
 
 
 
-class MinimaxVLProcessingInfo(BaseProcessingInfo):
-    """MiniMax VL 模型的处理信息类，提供模型处理所需的配置和方法"""
-
+class MinimaxVLProcessingInfo:
+    """MiniMax VL 模型的处理信息类"""
+    
+    def __init__(self, ctx: InputProcessingContext):
+        self.ctx = ctx
+    
     def get_hf_config(self) -> PretrainedConfig:
-        """获取模型的配置"""
-        return self.ctx.hf_config  # 直接返回原始配置，不进行类型转换
-
-    def get_tokenizer(self) -> PreTrainedTokenizer:
+        """直接返回原始配置，不进行类型检查"""
+        return self.ctx.hf_config
+    
+    def get_tokenizer(self) -> Any:
         """获取模型的分词器"""
-        tokenizer = self.ctx.tokenizer
-        assert isinstance(tokenizer, PreTrainedTokenizer)
-        return tokenizer
-
+        return self.ctx.tokenizer
+    
     def get_hf_processor(self, **kwargs: object) -> Any:
-        """获取或初始化 HuggingFace 处理器"""
+        """获取或初始化处理器"""
+        # 直接使用AutoProcessor加载MiniMax自己的处理器
         return self.ctx.init_processor(
-            self.ctx.processor_class,
-            config=self.get_hf_config(),
-            tokenizer=self.get_tokenizer(),
+            AutoProcessor,
+            trust_remote_code=True,
             **kwargs,
         )
-
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        """获取支持的多模态限制"""
-        return {"image": None}  # 不限制图像数量
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        """获取每个多模态项目的最大标记数"""
-        return {"image": self.get_num_image_tokens()}
-
-    def get_num_image_tokens(self) -> int:
-        """获取每个图像需要的标记数量"""
-        hf_config = self.get_hf_config()
-        
-        # 如果配置中明确指定了图像标记数量，则使用该值
-        if hasattr(hf_config, "num_image_tokens"):
-            return hf_config.num_image_tokens
-            
-        # 否则，根据视觉配置计算
-        if hasattr(hf_config, "vision_config"):
-            vision_config = hf_config.vision_config
-        elif hasattr(hf_config, "visual"):
-            vision_config = hf_config.visual
-        else:
-            # 默认值
-            return 576
-        
-        # 计算图像标记数量
-        if hasattr(vision_config, "image_size") and hasattr(vision_config, "patch_size"):
-            image_size = vision_config.image_size
-            patch_size = vision_config.patch_size
-        elif isinstance(vision_config, dict) and "image_size" in vision_config and "patch_size" in vision_config:
-            image_size = vision_config["image_size"]
-            patch_size = vision_config["patch_size"]
-        else:
-            # 默认值
-            return 576
-        
-        # 计算网格大小
-        grid_size = (image_size // patch_size) ** 2
-        
-        # 一些模型可能会进一步压缩标记数量
-        compression_factor = 1
-        if hasattr(vision_config, "compression_factor"):
-            compression_factor = vision_config.compression_factor
-        elif isinstance(vision_config, dict) and "compression_factor" in vision_config:
-            compression_factor = vision_config["compression_factor"]
-        
-        return grid_size // compression_factor
-        
-    def get_image_size_with_most_features(self) -> ImageSize:
-        """获取具有最多特征的图像尺寸"""
-        hf_config = self.get_hf_config()
-        
-        # 尝试不同的配置结构获取图像尺寸
-        if hasattr(hf_config, "vision_config"):
-            vision_config = hf_config.vision_config
-            if hasattr(vision_config, "image_size"):
-                image_size = vision_config.image_size
-            elif isinstance(vision_config, dict) and "image_size" in vision_config:
-                image_size = vision_config["image_size"]
-            else:
-                image_size = 224  # 默认值
-        elif hasattr(hf_config, "visual"):
-            vision_config = hf_config.visual
-            if isinstance(vision_config, dict) and "image_size" in vision_config:
-                image_size = vision_config["image_size"]
-            else:
-                image_size = 224  # 默认值
-        else:
-            image_size = 224  # 默认值
-        
-        return ImageSize(width=image_size, height=image_size)
+    
+    def get_image_size_with_most_features(self) -> Tuple[int, int]:
+        """获取最大特征的图像尺寸"""
+        # 从MiniMax模型配置中获取图像尺寸
+        config = self.get_hf_config()
+        if hasattr(config, "vision_config") and hasattr(config.vision_config, "image_size"):
+            return config.vision_config.image_size, config.vision_config.image_size
+        # 备选：从text_config中获取
+        elif hasattr(config, "text_config") and hasattr(config.text_config, "vision_image_size"):
+            size = config.text_config.vision_image_size
+            return size, size
+        # 默认值
+        return 336, 336
+    
+    def get_max_image_tokens(self) -> int:
+        """获取每个图像的最大令牌数"""
+        width, height = self.get_image_size_with_most_features()
+        # 尝试从配置中获取patch_size
+        config = self.get_hf_config()
+        patch_size = 14  # 默认值
+        if hasattr(config, "vision_config") and hasattr(config.vision_config, "patch_size"):
+            patch_size = config.vision_config.patch_size
+        return (width // patch_size) * (height // patch_size)
+    
+    def get_mm_max_tokens_per_item(self, model_config: Dict[str, Any]) -> Dict[str, int]:
+        """获取每种模态每项的最大令牌数"""
+        return {"image": self.get_max_image_tokens()}
 
 
-class MinimaxMultiModalProcessor(BaseMultiModalProcessor[MinimaxVLProcessingInfo]):
-    """MiniMax VL 模型的多模态处理器，处理图像和文本的融合"""
-
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # 处理图像标记，将图像标记替换为简单的占位符
-        prompt, num_matched_images = re.subn(
-            r"<image>.*?</image>",
-            r"<image></image>",
-            prompt,
+class MinimaxVLProcessor:
+    """MiniMax VL 模型的多模态处理器"""
+    
+    def __init__(self, ctx: InputProcessingContext):
+        self.ctx = ctx
+        self.info = MinimaxVLProcessingInfo(ctx)
+        
+    # 处理聊天模板的方法
+    def apply_chat_template(self, messages, **kwargs):
+        """应用聊天模板到消息列表"""
+        return self.info.get_tokenizer().apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
         )
-
-        image_data = mm_data.get("images")
-        if image_data is not None:
-            assert isinstance(image_data, list)
-            num_images = len(image_data)
-            assert num_matched_images == num_images, f"找到 {num_matched_images} 个图像标记，但提供了 {num_images} 张图像"
-
-        return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-        )
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> bool:
-        # 指示处理器是否自动应用更新
-        return False
-
-    def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldConfig]:
-        # 定义多模态字段配置
-        return dict(
-            pixel_values=MultiModalFieldConfig.batched("image"),
-            image_embeds=MultiModalFieldConfig.batched("image"),
-        )
-
-    def _get_prompt_updates(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
-    ) -> Sequence[PromptUpdate]:
-        # 获取处理器和标记器
-        tokenizer = self.info.get_tokenizer()
-        config = self.info.get_hf_config()
         
-        # 获取图像标记的ID
-        image_token_id = config.image_token_id
-        
-        # 获取每个图像需要的标记数量
-        num_image_tokens = self.info.get_num_image_tokens()
-        
-        # 创建图像标记序列
-        image_tokens = [image_token_id] * num_image_tokens
-        
-        # 返回提示更新
-        return [
-            PromptReplacement(
-                modality="image",
-                target=[image_token_id],  # 目标是单个图像标记
-                replacement=PromptUpdateDetails(
-                    full=image_tokens,  # 完整替换为多个图像标记
-                    features=image_tokens,  # 特征部分
-                ),
-            )
-        ]
+    # 实现其他必要的处理方法...
 
-
-class MinimaxDummyInputsBuilder(BaseDummyInputsBuilder[MinimaxVLProcessingInfo]):
-    """为 MiniMax VL 模型构建虚拟输入的构建器"""
-
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
-        # 获取配置
-        hf_config = self.info.get_hf_config()
-        vision_config = None
-        
-        # 尝试获取视觉配置
-        if hasattr(hf_config, "vision_config"):
-            vision_config = hf_config.vision_config
-        elif hasattr(hf_config, "visual"):
-            vision_config = hf_config.visual
-        
-        # 获取图像尺寸
-        if vision_config is not None:
-            if hasattr(vision_config, "image_size"):
-                target_width = target_height = vision_config.image_size
-            elif isinstance(vision_config, dict) and "image_size" in vision_config:
-                target_width = target_height = vision_config["image_size"]
-            else:
-                target_width = target_height = 224  # 默认值
-        else:
-            target_width = target_height = 224  # 默认值
-            
-        num_images = mm_counts.get("image", 0)
-        
-        # 创建虚拟图像数据
-        mm_data = {
-            "images": self._get_dummy_images(
-                width=target_width,
-                height=target_height,
-                num_images=num_images
-            )
-        }
-        
-        # 创建带有图像标记的提示文本
-        prompt_text = "".join(f"图片 {i}: <image></image>\n" for i in range(1, num_images + 1))
-        
-        return ProcessorInputs(
-            prompt_text=prompt_text,
-            mm_data=mm_data,
-        )
-
-
-# 注册多模态处理器
-@MULTIMODAL_REGISTRY.register_processor(MinimaxMultiModalProcessor,
-                                       info=MinimaxVLProcessingInfo,
-                                       dummy_inputs=MinimaxDummyInputsBuilder)
+# 注册自定义处理器
+@MULTIMODAL_REGISTRY.register_processor(MinimaxVLProcessor, 
+                                       info=MinimaxVLProcessingInfo)
 class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
     """MiniMax VL 模型，支持多模态处理"""
     
