@@ -1033,7 +1033,7 @@ class MinimaxVLProcessor:
     MinimaxVLProcessor, 
     info=MinimaxVLProcessingInfo,
     dummy_inputs={"image": ["<image>"]})  # 添加缺少的dummy_inputs参数
-class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
+class LlavaForConditionalGeneration(MiniMaxVL01Model, SupportsMultiModal):
     """MiniMax VL 模型，支持多模态处理"""
     
     def __init__(

@@ -162,7 +162,7 @@ _MULTIMODAL_MODELS = {
     "AriaForConditionalGeneration": ("aria", "AriaForConditionalGeneration"),
     "Blip2ForConditionalGeneration": ("blip2", "Blip2ForConditionalGeneration"),
     "AbabForCausalLM": ("minimax_vl_01", "AbabForCausalLM"),
-    "MiniMaxVL01ForConditionalGeneration": ("minimax_vl_01", "AbabForCausalLM"),
+    "MiniMaxVL01ForConditionalGeneration": ("minimax_vl_01", "LlavaForConditionalGeneration"),
     "ChameleonForConditionalGeneration": ("chameleon", "ChameleonForConditionalGeneration"),  # noqa: E501
     "DeepseekVLV2ForCausalLM": ("deepseek_vl2", "DeepseekVLV2ForCausalLM"),
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
