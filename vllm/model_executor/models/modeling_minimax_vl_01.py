@@ -1061,14 +1061,24 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal):
     
     def __init__(
         self,
-        config: PretrainedConfig,
+        *,
+        vllm_config=None,
+        prefix: str = "",
+        config: Optional[PretrainedConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         cache_config: Optional[CacheConfig] = None,
         scheduler_config=None,
-        prefix: str = "",
+        **kwargs: Any,
     ) -> None:
         # 首先调用父类的初始化方法
         super().__init__()
+        
+        # 如果提供了vllm_config，从中提取所需配置
+        if vllm_config is not None:
+            config = vllm_config.model_config.hf_config
+            quant_config = vllm_config.quant_config
+            cache_config = vllm_config.cache_config
+            scheduler_config = vllm_config.scheduler_config
         
         # 确保最基本的配置属性存在
         if not hasattr(config, "hidden_size"):
@@ -1215,10 +1225,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal):
     def from_vllm_config(cls, vllm_config: VllmConfig, prefix: str = ""):
         """从vllm_config创建模型实例的工厂方法"""
         return cls(
-            config=vllm_config.model_config.hf_config,
-            quant_config=vllm_config.quant_config,
-            cache_config=vllm_config.cache_config,
-            scheduler_config=vllm_config.scheduler_config,
+            vllm_config=vllm_config,
             prefix=prefix
         )
     
