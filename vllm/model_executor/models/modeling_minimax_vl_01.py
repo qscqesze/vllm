@@ -3,7 +3,7 @@
 import copy
 import math
 import re
-from typing import Dict, Iterable, List, Optional, Tuple, Union, Set, Any
+from typing import Dict, Iterable, List, Optional, Tuple, Union, Set, Any, TYPE_CHECKING
 import torch
 import torch.distributed
 import torch.nn.functional as F
@@ -35,7 +35,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.model_executor.models.interfaces import SupportsMultiModal
@@ -45,9 +45,10 @@ from .utils import PPMissingLayer, make_layers
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from transformers import PretrainedConfig, CLIPVisionConfig
-from vllm.inputs import InputProcessingContext
+
+if TYPE_CHECKING:
+    from vllm.inputs import InputProcessingContext
 
 def replace_weight_name(name: str,
                         key: str = None,
@@ -965,7 +966,7 @@ class MiniMaxVL01Model(nn.Module):
 class MinimaxVLProcessingInfo:
     """MiniMax VL 模型的处理信息类"""
     
-    def __init__(self, ctx: InputProcessingContext):
+    def __init__(self, ctx: "InputProcessingContext"):
         self.ctx = ctx
     
     def get_hf_config(self) -> PretrainedConfig:
@@ -1016,7 +1017,7 @@ class MinimaxVLProcessingInfo:
 class MinimaxVLProcessor:
     """MiniMax VL 模型的多模态处理器"""
     
-    def __init__(self, ctx: InputProcessingContext):
+    def __init__(self, ctx: "InputProcessingContext"):
         self.ctx = ctx
         self.info = MinimaxVLProcessingInfo(ctx)
         

@@ -42,7 +42,8 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import resolve_obj_by_qualname
-from vllm.model_executor.models.minimax_vl_01 import MiniMaxVL01Config
+# 删除直接导入，改为在需要时动态导入
+# from vllm.model_executor.models.minimax_vl_01 import MiniMaxVL01Config
 
 if VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -79,7 +80,8 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "solar": SolarConfig,
     "telechat": Telechat2Config,
     "ultravox": UltravoxConfig,
-    "minimax_vl_01": MiniMaxVL01Config,
+    # 使用字符串引用，稍后解析
+    "minimax_vl_01": "vllm.model_executor.models.minimax_vl_01.MiniMaxVL01Config",
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 
@@ -291,6 +293,12 @@ def get_config(
         model_type = config_dict.get("model_type")
         if model_type in _CONFIG_REGISTRY:
             config_class = _CONFIG_REGISTRY[model_type]
+            # 处理字符串引用的配置类
+            if isinstance(config_class, str):
+                # 动态导入字符串引用的配置类
+                config_class = resolve_obj_by_qualname(config_class)
+                # 缓存解析后的结果，避免重复解析
+                _CONFIG_REGISTRY[model_type] = config_class
             config = config_class.from_pretrained(
                 model,
                 revision=revision,
