@@ -21,7 +21,8 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.activation import SiluAndMul, QuickGELU
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.layernorm import RMSNorm, LayerNorm
+from vllm.model_executor.layers.layernorm import RMSNorm
+from torch.nn import LayerNorm
 from vllm.model_executor.layers.lightning_attn import (
     lightning_attention2_parallel, linear_decode_forward_triton)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
