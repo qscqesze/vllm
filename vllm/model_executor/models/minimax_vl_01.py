@@ -3,19 +3,14 @@
 import copy
 import math
 import re
-from typing import Dict, Iterable, List, Optional, Tuple, Union, Set, Mapping, Any
-from collections.abc import Sequence
+from typing import Dict, Iterable, List, Optional, Tuple, Union, Set, Any
 import torch
 import torch.distributed
 import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from transformers.configuration_utils import PretrainedConfig
-from transformers.tokenization_utils import PreTrainedTokenizer
-from transformers import BatchFeature, PretrainedConfig, ProcessorMixin, AutoProcessor
-from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
+from transformers import PretrainedConfig, AutoProcessor
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
@@ -34,35 +29,22 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
-from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate, PromptUpdateDetails)
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
-from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 
-from .interfaces import HasInnerState, IsHybrid
 from .minimax_cache import MinimaxCacheManager, MinimaxCacheParams
-from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
+from .utils import PPMissingLayer, make_layers
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal
 from vllm.model_executor.layers.sampler import SamplerOutput
-from .utils import AutoWeightsLoader
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.multimodal.processing import BaseMultiModalProcessor, ProcessingCache
-from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate)
-from vllm.multimodal.parse import ImageSize
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from transformers import PretrainedConfig
 from vllm.inputs import InputProcessingContext
 
