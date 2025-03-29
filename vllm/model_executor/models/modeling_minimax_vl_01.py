@@ -886,6 +886,77 @@ class MiniMaxVL01Model(nn.Module):
             self.norm = PPMissingLayer()
         self.embed_scale = 1.0
         return
+        
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
+        """自定义权重加载函数，处理权重路径映射问题"""
+        loaded_params = set()
+        
+        # 为不同部分分类权重
+        model_weights = []
+        lm_head_weights = []
+        vision_weights = []
+        projector_weights = []
+        
+        # 对权重进行分类
+        for name, weight in weights:
+            if name.startswith("lm_head"):
+                lm_head_weights.append((name, weight))
+            elif name.startswith("vision_tower"):
+                vision_weights.append((name, weight))
+            elif name.startswith("multi_modal_projector"):
+                projector_weights.append((name, weight))
+            else:
+                model_weights.append((name, weight))
+                
+        # 加载模型主体的权重
+        if model_weights:
+            loaded_params.update(self.model.load_weights(model_weights))
+        
+        # 加载lm_head的权重
+        if get_pp_group().is_last_rank and hasattr(self, 'lm_head'):
+            for name, loaded_weight in lm_head_weights:
+                param = self.lm_head.weight
+                weight_loader = getattr(param, "weight_loader", self.lm_head_weight_loader)
+                try:
+                    weight_loader(param, loaded_weight)
+                    loaded_params.add("lm_head.weight")
+                except Exception as e:
+                    if OPEN_DEBUG:
+                        print(f"Error loading lm_head.weight: {e}")
+                        print(f"Param shape: {param.shape}, Weight shape: {loaded_weight.shape}")
+                    raise
+        
+        # 加载视觉塔的权重
+        if self.has_vision_tower and hasattr(self, 'vision_tower'):
+            for name, weight in vision_weights:
+                # 去掉前缀
+                name = name.replace("vision_tower.", "")
+                # 尝试找到对应参数并加载
+                for param_name, param in self.vision_tower.named_parameters():
+                    if param_name == name:
+                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                        try:
+                            weight_loader(param, weight)
+                            loaded_params.add(f"vision_tower.{param_name}")
+                        except Exception as e:
+                            print(f"Error loading vision_tower.{param_name}: {e}")
+        
+        # 加载多模态投影器的权重
+        if self.has_vision_tower and hasattr(self, 'multi_modal_projector'):
+            for name, weight in projector_weights:
+                # 去掉前缀
+                name = name.replace("multi_modal_projector.", "")
+                # 尝试找到对应参数并加载
+                for param_name, param in self.multi_modal_projector.named_parameters():
+                    if param_name == name:
+                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                        try:
+                            weight_loader(param, weight)
+                            loaded_params.add(f"multi_modal_projector.{param_name}")
+                        except Exception as e:
+                            print(f"Error loading multi_modal_projector.{param_name}: {e}")
+        
+        return loaded_params
 
     def _clear_prefill_cache(self, attn_metadata,
                              minimax_cache_tensors: torch.Tensor, **kwargs):
@@ -978,7 +1049,6 @@ class MiniMaxVL01Model(nn.Module):
             hidden_states = self.norm(hidden_states)
 
         return hidden_states
-
 
 
 class MinimaxVLProcessingInfo:
@@ -1309,56 +1379,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal):
             return sampler(logits, sampling_metadata)
         return None
     
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
-        """自定义权重加载函数，处理权重路径映射问题"""
-        loaded_params = set()
-        
-        # 首先加载模型主体的权重
-        model_weights = [(name, weight) for name, weight in weights 
-                         if not name.startswith("lm_head") and 
-                            not name.startswith("vision_tower") and 
-                            not name.startswith("multi_modal_projector")]
-        loaded_params.update(self.model.load_weights(model_weights))
-        
-        # 加载lm_head的权重
-        if get_pp_group().is_last_rank and hasattr(self, 'lm_head'):
-            lm_head_weights = [(name, weight) for name, weight in weights if name.startswith("lm_head")]
-            for name, loaded_weight in lm_head_weights:
-                param = self.lm_head.weight
-                weight_loader = getattr(param, "weight_loader", self.lm_head_weight_loader)
-                try:
-                    weight_loader(param, loaded_weight)
-                    loaded_params.add("lm_head.weight")
-                except Exception as e:
-                    if OPEN_DEBUG:
-                        print(f"Error loading lm_head.weight: {e}")
-                        print(f"Param shape: {param.shape}, Weight shape: {loaded_weight.shape}")
-                    raise
-        
-        # 加载视觉塔和多模态投影器的权重
-        if self.has_vision_tower:
-            vision_weights = [(name.replace("vision_tower.", ""), weight) 
-                             for name, weight in weights if name.startswith("vision_tower")]
-            # 如果有视觉塔权重，加载它们
-            if vision_weights:
-                # 假设视觉塔有自己的加载权重方法
-                # 这里需要根据实际实现进行调整
-                for name, weight in vision_weights:
-                    # 加载视觉塔权重的逻辑
-                    pass
-            
-            projector_weights = [(name.replace("multi_modal_projector.", ""), weight) 
-                                for name, weight in weights if name.startswith("multi_modal_projector")]
-            # 如果有投影器权重，加载它们
-            if projector_weights:
-                # 假设投影器有自己的加载权重方法
-                # 这里需要根据实际实现进行调整
-                for name, weight in projector_weights:
-                    # 加载投影器权重的逻辑
-                    pass
-        
-        return loaded_params
-
     def _parse_and_validate_image_input(self, **kwargs) -> Optional[Dict[str, torch.Tensor]]:
         """解析并验证图像输入"""
         pixel_values = kwargs.get("pixel_values", None)
