@@ -3,12 +3,13 @@
 import copy
 import math
 import re
-from typing import Dict, Iterable, List, Optional, Tuple, Union, Set, Any, TYPE_CHECKING
+from typing import Dict, Iterable, List, Optional, Tuple, Union, Set, Any, TYPE_CHECKING, Mapping
 import torch
 import torch.distributed
 import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
+from PIL import Image
 from transformers.configuration_utils import PretrainedConfig
 from transformers import PretrainedConfig, AutoProcessor
 from vllm.attention import Attention, AttentionMetadata
@@ -43,6 +44,7 @@ from vllm.model_executor.models.interfaces import SupportsMultiModal
 from .minimax_cache import MinimaxCacheManager, MinimaxCacheParams
 from .utils import PPMissingLayer, make_layers
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal
 from vllm.model_executor.layers.sampler import SamplerOutput
 from transformers import PretrainedConfig, CLIPVisionConfig
@@ -1136,6 +1138,36 @@ class MinimaxVLProcessingInfo:
         return {"image": self.get_max_image_tokens()}
 
 
+class MinimaxVLDummyInputsBuilder(BaseDummyInputsBuilder[MinimaxVLProcessingInfo]):
+    """用于创建MiniMaxVL模型虚拟输入的构建器"""
+    
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        """构建用于分析的虚拟输入数据"""
+        num_images = mm_counts.get("image", 0)
+        
+        # 获取图像尺寸
+        image_width, image_height = self.info.get_image_size_with_most_features()
+        
+        # 创建虚拟图像数据
+        mm_data = {
+            "image": self._get_dummy_images(
+                width=image_width, 
+                height=image_height,
+                num_images=num_images
+            )
+        }
+        
+        # 返回处理器输入
+        return ProcessorInputs(
+            prompt_text="<image>" * num_images,  # 使用简单的图像标记
+            mm_data=mm_data
+        )
+
+
 class MinimaxVLProcessor:
     """MiniMax VL 模型的多模态处理器"""
     
@@ -1152,11 +1184,11 @@ class MinimaxVLProcessor:
         
     # 实现其他必要的处理方法...
 
-# 修改处理器注册方式
+# 修改处理器注册方式，使用DummyInputsBuilder类
 @MULTIMODAL_REGISTRY.register_processor(
     MinimaxVLProcessor, 
     info=MinimaxVLProcessingInfo,
-    dummy_inputs={"image": ["<image>"]})  # 添加缺少的dummy_inputs参数
+    dummy_inputs=MinimaxVLDummyInputsBuilder)  # 使用自定义的DummyInputsBuilder类
 class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal):
     """MiniMax VL 模型，支持多模态处理"""
     
