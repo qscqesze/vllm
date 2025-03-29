@@ -299,13 +299,28 @@ def get_config(
                 config_class = resolve_obj_by_qualname(config_class)
                 # 缓存解析后的结果，避免重复解析
                 _CONFIG_REGISTRY[model_type] = config_class
-            config = config_class.from_pretrained(
-                model,
-                revision=revision,
-                code_revision=code_revision,
-                token=HF_TOKEN,
-                **kwargs,
-            )
+            
+            # 添加更强大的错误处理
+            try:
+                config = config_class.from_pretrained(
+                    model,
+                    revision=revision,
+                    code_revision=code_revision,
+                    token=HF_TOKEN,
+                    **kwargs,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"初始化配置类 {config_class.__name__} 时出现错误：{e}。尝试使用通用配置类。"
+                )
+                # 如果使用自定义配置类失败，回退到使用通用配置
+                config = PretrainedConfig.from_pretrained(
+                    model,
+                    revision=revision,
+                    code_revision=code_revision,
+                    token=HF_TOKEN,
+                    **kwargs,
+                )
         else:
             try:
                 config = AutoConfig.from_pretrained(

@@ -58,8 +58,16 @@ class MiniMaxVL01Config(PretrainedConfig):
         # 避免_LazyConfigMapping初始化错误
         self.mapping = {}
         
-        # 确保text_config存在且具有num_attention_heads属性
+        # 确保text_config存在且是PretrainedConfig对象
         if hasattr(self, "text_config"):
+            # 如果text_config是字典，将其转换为PretrainedConfig对象
+            if isinstance(self.text_config, dict):
+                text_config_dict = self.text_config
+                self.text_config = PretrainedConfig()
+                for key, value in text_config_dict.items():
+                    setattr(self.text_config, key, value)
+            
+            # 确保text_config有必要的属性
             if not hasattr(self.text_config, "num_attention_heads"):
                 # 如果缺少必要的属性，从其他属性或默认值中设置
                 self.text_config.num_attention_heads = self.num_attention_heads
@@ -74,8 +82,30 @@ class MiniMaxVL01Config(PretrainedConfig):
                     setattr(self.text_config, attr, getattr(self, attr))
         
         # 确保vision_config存在，以启用视觉能力
-        if not hasattr(self, "vision_config"):
-            # 添加基本的视觉配置
+        if hasattr(self, "vision_config"):
+            # 如果vision_config是字典，将其转换为PretrainedConfig对象
+            if isinstance(self.vision_config, dict):
+                vision_config_dict = self.vision_config
+                self.vision_config = PretrainedConfig()
+                for key, value in vision_config_dict.items():
+                    setattr(self.vision_config, key, value)
+            
+            # 确保vision_config有必要的属性
+            for attr in ["hidden_size", "image_size", "patch_size", "num_hidden_layers", 
+                         "num_attention_heads", "intermediate_size"]:
+                if not hasattr(self.vision_config, attr):
+                    default_values = {
+                        "hidden_size": 1024,
+                        "image_size": 336,
+                        "patch_size": 14,
+                        "num_hidden_layers": 24,
+                        "num_attention_heads": 16,
+                        "intermediate_size": 4096,
+                        "projection_dim": self.hidden_size
+                    }
+                    setattr(self.vision_config, attr, default_values[attr])
+        else:
+            # 如果没有vision_config，创建一个基本的
             self.vision_config = PretrainedConfig()
             # 设置常见的视觉模型参数
             self.vision_config.hidden_size = 1024

@@ -766,6 +766,24 @@ class MiniMaxVL01Model(nn.Module):
     ) -> None:
         super().__init__()
 
+        # 确保基本配置属性存在
+        if not hasattr(config, "pad_token_id"):
+            config.pad_token_id = 0
+        if not hasattr(config, "vocab_size"):
+            config.vocab_size = 32000
+        if not hasattr(config, "hidden_size"):
+            config.hidden_size = 4096
+        if not hasattr(config, "num_attention_heads"):
+            config.num_attention_heads = 32
+        if not hasattr(config, "num_hidden_layers"):
+            config.num_hidden_layers = 32
+        if not hasattr(config, "head_dim"):
+            config.head_dim = config.hidden_size // config.num_attention_heads
+        if not hasattr(config, "max_position_embeddings"):
+            config.max_position_embeddings = 32768
+        if not hasattr(config, "rms_norm_eps"):
+            config.rms_norm_eps = 1e-6
+            
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
@@ -1052,15 +1070,39 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal):
         # 首先调用父类的初始化方法
         super().__init__()
         
+        # 确保最基本的配置属性存在
+        if not hasattr(config, "hidden_size"):
+            config.hidden_size = 4096
+        if not hasattr(config, "num_attention_heads"):
+            config.num_attention_heads = 32
+        if not hasattr(config, "num_hidden_layers"):
+            config.num_hidden_layers = 32
+        
         # 确保config.text_config包含必要的属性，如果是多模态模型
         if hasattr(config, "text_config"):
+            # 如果text_config是字典，将其转换为PretrainedConfig对象
+            if isinstance(config.text_config, dict):
+                text_config_dict = config.text_config
+                config.text_config = PretrainedConfig()
+                for key, value in text_config_dict.items():
+                    setattr(config.text_config, key, value)
+                    
             # 检查主要属性
             for attr in ["hidden_size", "num_attention_heads", "num_hidden_layers"]:
                 if not hasattr(config.text_config, attr) and hasattr(config, attr):
                     setattr(config.text_config, attr, getattr(config, attr))
         
+        # 确保config.vision_config包含必要的属性，如果是多模态模型
+        if hasattr(config, "vision_config") and not isinstance(config.vision_config, PretrainedConfig):
+            if isinstance(config.vision_config, dict):
+                vision_config_dict = config.vision_config
+                config.vision_config = PretrainedConfig()
+                for key, value in vision_config_dict.items():
+                    setattr(config.vision_config, key, value)
+        
+        model_config = config.text_config if hasattr(config, "text_config") else config
         self.model = MiniMaxVL01Model(
-            config=config.text_config if hasattr(config, "text_config") else config,
+            config=model_config,
             quant_config=quant_config,
             cache_config=cache_config,
             scheduler_config=scheduler_config,
