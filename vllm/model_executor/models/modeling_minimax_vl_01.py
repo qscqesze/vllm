@@ -888,73 +888,107 @@ class MiniMaxVL01Model(nn.Module):
         return
         
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
-        """自定义权重加载函数，处理权重路径映射问题"""
+        """加载模型权重"""
         loaded_params = set()
         
-        # 为不同部分分类权重
-        model_weights = []
-        lm_head_weights = []
-        vision_weights = []
-        projector_weights = []
+        # 为不同模块分类权重
+        embedding_weights = []
+        layer_weights = {}
+        norm_weights = []
         
         # 对权重进行分类
         for name, weight in weights:
-            if name.startswith("lm_head"):
-                lm_head_weights.append((name, weight))
-            elif name.startswith("vision_tower"):
-                vision_weights.append((name, weight))
-            elif name.startswith("multi_modal_projector"):
-                projector_weights.append((name, weight))
-            else:
-                model_weights.append((name, weight))
+            if name.startswith("embed_tokens"):
+                embedding_weights.append((name.replace("embed_tokens.", ""), weight))
+            elif name.startswith("norm"):
+                norm_weights.append((name.replace("norm.", ""), weight))
+            elif name.startswith("layers."):
+                parts = name.split(".")
+                if len(parts) > 2:
+                    layer_idx = int(parts[1])
+                    layer_name = f"layers.{layer_idx}"
+                    if layer_name not in layer_weights:
+                        layer_weights[layer_name] = []
+                    # 去除层前缀
+                    layer_weights[layer_name].append((name[len(layer_name) + 1:], weight))
+        
+        # 首先加载嵌入层权重
+        if get_pp_group().is_first_rank and hasattr(self, 'embed_tokens') and not isinstance(self.embed_tokens, PPMissingLayer):
+            for name, weight in embedding_weights:
+                if hasattr(self.embed_tokens, "weight") and name == "weight":
+                    param = self.embed_tokens.weight
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    try:
+                        weight_loader(param, weight)
+                        loaded_params.add("embed_tokens.weight")
+                    except Exception as e:
+                        print(f"Error loading embed_tokens.weight: {e}")
+        
+        # 加载层权重
+        for layer_name, weights_list in layer_weights.items():
+            layer_idx = int(layer_name.split(".")[1])
+            # 检查层索引是否在有效范围内
+            if layer_idx >= self.start_layer and layer_idx < self.end_layer:
+                # 调整索引以匹配本地层列表
+                local_idx = layer_idx - self.start_layer
+                layer = self.layers[local_idx]
                 
-        # 加载模型主体的权重
-        if model_weights:
-            loaded_params.update(self.model.load_weights(model_weights))
+                # 创建模块名称到权重的映射
+                module_weights = {}
+                for name, weight in weights_list:
+                    module_name = name.split(".")[0]
+                    if module_name not in module_weights:
+                        module_weights[module_name] = []
+                    # 去除模块名称前缀
+                    sub_name = name[len(module_name) + 1:] if len(module_name) + 1 < len(name) else ""
+                    module_weights[module_name].append((sub_name, weight))
+                
+                # 遍历每个子模块加载权重
+                for module_name, sub_weights in module_weights.items():
+                    if hasattr(layer, module_name):
+                        module = getattr(layer, module_name)
+                        for sub_name, weight in sub_weights:
+                            if sub_name:  # 不是空字符串
+                                # 处理嵌套属性
+                                parts = sub_name.split(".")
+                                curr_module = module
+                                for i, part in enumerate(parts[:-1]):
+                                    if hasattr(curr_module, part):
+                                        curr_module = getattr(curr_module, part)
+                                    else:
+                                        curr_module = None
+                                        break
+                                
+                                if curr_module is not None and hasattr(curr_module, parts[-1]):
+                                    param = getattr(curr_module, parts[-1])
+                                    if isinstance(param, nn.Parameter):
+                                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                                        try:
+                                            weight_loader(param, weight)
+                                            loaded_params.add(f"{layer_name}.{module_name}.{sub_name}")
+                                        except Exception as e:
+                                            print(f"Error loading {layer_name}.{module_name}.{sub_name}: {e}")
+                            elif hasattr(module, "weight"):  # 直接是权重
+                                param = module.weight
+                                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                                try:
+                                    weight_loader(param, weight)
+                                    loaded_params.add(f"{layer_name}.{module_name}.weight")
+                                except Exception as e:
+                                    print(f"Error loading {layer_name}.{module_name}.weight: {e}")
         
-        # 加载lm_head的权重
-        if get_pp_group().is_last_rank and hasattr(self, 'lm_head'):
-            for name, loaded_weight in lm_head_weights:
-                param = self.lm_head.weight
-                weight_loader = getattr(param, "weight_loader", self.lm_head_weight_loader)
-                try:
-                    weight_loader(param, loaded_weight)
-                    loaded_params.add("lm_head.weight")
-                except Exception as e:
-                    if OPEN_DEBUG:
-                        print(f"Error loading lm_head.weight: {e}")
-                        print(f"Param shape: {param.shape}, Weight shape: {loaded_weight.shape}")
-                    raise
-        
-        # 加载视觉塔的权重
-        if self.has_vision_tower and hasattr(self, 'vision_tower'):
-            for name, weight in vision_weights:
-                # 去掉前缀
-                name = name.replace("vision_tower.", "")
-                # 尝试找到对应参数并加载
-                for param_name, param in self.vision_tower.named_parameters():
-                    if param_name == name:
+        # 最后加载norm层
+        if get_pp_group().is_last_rank and hasattr(self, 'norm') and not isinstance(self.norm, PPMissingLayer):
+            for name, weight in norm_weights:
+                if hasattr(self.norm, name):
+                    param = getattr(self.norm, name)
+                    if isinstance(param, nn.Parameter):
                         weight_loader = getattr(param, "weight_loader", default_weight_loader)
                         try:
                             weight_loader(param, weight)
-                            loaded_params.add(f"vision_tower.{param_name}")
+                            loaded_params.add(f"norm.{name}")
                         except Exception as e:
-                            print(f"Error loading vision_tower.{param_name}: {e}")
-        
-        # 加载多模态投影器的权重
-        if self.has_vision_tower and hasattr(self, 'multi_modal_projector'):
-            for name, weight in projector_weights:
-                # 去掉前缀
-                name = name.replace("multi_modal_projector.", "")
-                # 尝试找到对应参数并加载
-                for param_name, param in self.multi_modal_projector.named_parameters():
-                    if param_name == name:
-                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                        try:
-                            weight_loader(param, weight)
-                            loaded_params.add(f"multi_modal_projector.{param_name}")
-                        except Exception as e:
-                            print(f"Error loading multi_modal_projector.{param_name}: {e}")
+                            print(f"Error loading norm.{name}: {e}")
         
         return loaded_params
 
