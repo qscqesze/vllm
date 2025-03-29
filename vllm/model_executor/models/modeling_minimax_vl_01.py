@@ -45,6 +45,7 @@ from .minimax_cache import MinimaxCacheManager, MinimaxCacheParams
 from .utils import PPMissingLayer, make_layers
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.processing import ProcessingCache
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal
 from vllm.model_executor.layers.sampler import SamplerOutput
 from transformers import PretrainedConfig, CLIPVisionConfig
@@ -1171,9 +1172,15 @@ class MinimaxVLDummyInputsBuilder(BaseDummyInputsBuilder[MinimaxVLProcessingInfo
 class MinimaxVLProcessor:
     """MiniMax VL 模型的多模态处理器"""
     
-    def __init__(self, ctx: "InputProcessingContext"):
-        self.ctx = ctx
-        self.info = MinimaxVLProcessingInfo(ctx)
+    def __init__(self, 
+                info: MinimaxVLProcessingInfo, 
+                dummy_inputs_builder: MinimaxVLDummyInputsBuilder,
+                *,
+                cache: Optional[ProcessingCache] = None):
+        self.info = info
+        self.dummy_inputs_builder = dummy_inputs_builder
+        self.cache = cache
+        self.ctx = info.ctx
         
     # 处理聊天模板的方法
     def apply_chat_template(self, messages, **kwargs):
