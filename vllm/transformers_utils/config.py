@@ -42,6 +42,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import resolve_obj_by_qualname
+from vllm.model_executor.models.minimax_vl_01 import MiniMaxVL01Config
 
 if VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -78,6 +79,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "solar": SolarConfig,
     "telechat": Telechat2Config,
     "ultravox": UltravoxConfig,
+    "minimax_vl_01": MiniMaxVL01Config,
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 

@@ -1037,6 +1037,9 @@ class MinimaxVLProcessor:
 class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal):
     """MiniMax VL 模型，支持多模态处理"""
     
+    # 添加配置类引用
+    config_class = "MiniMaxVL01Config"
+    
     def __init__(
         self,
         config: PretrainedConfig,

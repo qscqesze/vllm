@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from vllm.envs import VLLM_USE_MODELSCOPE
+from vllm.model_executor.models.minimax_vl_01 import MiniMaxVL01Config
 
 if VLLM_USE_MODELSCOPE:
     # Patch here, before each import happens
