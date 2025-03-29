@@ -1051,8 +1051,16 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal):
     ) -> None:
         # 首先调用父类的初始化方法
         super().__init__()
+        
+        # 确保config.text_config包含必要的属性，如果是多模态模型
+        if hasattr(config, "text_config"):
+            # 检查主要属性
+            for attr in ["hidden_size", "num_attention_heads", "num_hidden_layers"]:
+                if not hasattr(config.text_config, attr) and hasattr(config, attr):
+                    setattr(config.text_config, attr, getattr(config, attr))
+        
         self.model = MiniMaxVL01Model(
-            config=config,
+            config=config.text_config if hasattr(config, "text_config") else config,
             quant_config=quant_config,
             cache_config=cache_config,
             scheduler_config=scheduler_config,

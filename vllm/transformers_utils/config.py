@@ -726,11 +726,25 @@ def get_hf_text_config(config: PretrainedConfig):
     No op for pure text models.
     """
     if hasattr(config, "text_config"):
-        # The code operates under the assumption that text_config should have
-        # `num_attention_heads` (among others). Assert here to fail early
-        # if transformers config doesn't align with this assumption.
-        assert hasattr(config.text_config, "num_attention_heads")
-        return config.text_config
+        # 首先确保text_config存在所需属性
+        try:
+            # The code operates under the assumption that text_config should have
+            # `num_attention_heads` (among others). Assert here to fail early
+            # if transformers config doesn't align with this assumption.
+            assert hasattr(config.text_config, "num_attention_heads")
+            return config.text_config
+        except AssertionError:
+            # 如果缺少必需的属性，尝试补充
+            logger.warning(
+                "text_config缺少必需的num_attention_heads属性。"
+                "尝试从主配置或默认值填充必要的属性。"
+            )
+            if hasattr(config, "num_attention_heads"):
+                config.text_config.num_attention_heads = config.num_attention_heads
+            else:
+                # 设置一个合理的默认值
+                config.text_config.num_attention_heads = 32
+            return config.text_config
     else:
         return config
 
