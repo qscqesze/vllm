@@ -1025,8 +1025,8 @@ class MinimaxVLProcessingInfo(BaseProcessingInfo):
         elif hasattr(hf_config, "visual"):
             vision_config = hf_config.visual
         else:
-            # 默认值，如果无法确定
-            return 576  # 常见的默认值 (24x24)
+            # 默认值
+            return 576
         
         # 计算图像标记数量
         if hasattr(vision_config, "image_size") and hasattr(vision_config, "patch_size"):
@@ -1086,7 +1086,6 @@ class MinimaxMultiModalProcessor(BaseMultiModalProcessor[MinimaxVLProcessingInfo
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # 处理图像标记，将图像标记替换为简单的占位符
-        # 类似于 Qwen-VL 的处理方式
         prompt, num_matched_images = re.subn(
             r"<image>.*?</image>",
             r"<image></image>",
@@ -1167,15 +1166,30 @@ class MinimaxDummyInputsBuilder(BaseDummyInputsBuilder[MinimaxVLProcessingInfo])
     ) -> ProcessorInputs:
         # 获取配置
         hf_config = self.info.get_hf_config()
-        vision_config = hf_config.visual
+        vision_config = None
+        
+        # 尝试获取视觉配置
+        if hasattr(hf_config, "vision_config"):
+            vision_config = hf_config.vision_config
+        elif hasattr(hf_config, "visual"):
+            vision_config = hf_config.visual
         
         # 获取图像尺寸
-        target_width = target_height = vision_config["image_size"]
+        if vision_config is not None:
+            if hasattr(vision_config, "image_size"):
+                target_width = target_height = vision_config.image_size
+            elif isinstance(vision_config, dict) and "image_size" in vision_config:
+                target_width = target_height = vision_config["image_size"]
+            else:
+                target_width = target_height = 224  # 默认值
+        else:
+            target_width = target_height = 224  # 默认值
+            
         num_images = mm_counts.get("image", 0)
         
         # 创建虚拟图像数据
         mm_data = {
-            "image": self._get_dummy_images(
+            "images": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
                 num_images=num_images
@@ -1196,7 +1210,7 @@ class MinimaxDummyInputsBuilder(BaseDummyInputsBuilder[MinimaxVLProcessingInfo])
                                        info=MinimaxVLProcessingInfo,
                                        dummy_inputs=MinimaxDummyInputsBuilder)
 class AbabForCausalLM(MiniMaxVL01Model, SupportsMultiModal):
-    """MiniMaxText01 model with multimodal capabilities."""
+    """MiniMax VL 模型，支持多模态处理"""
     
     def __init__(
         self,
