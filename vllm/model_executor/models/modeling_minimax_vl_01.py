@@ -1033,7 +1033,7 @@ class MinimaxVLProcessor:
     MinimaxVLProcessor, 
     info=MinimaxVLProcessingInfo,
     dummy_inputs={"image": ["<image>"]})  # 添加缺少的dummy_inputs参数
-class LlavaForConditionalGeneration(MiniMaxVL01Model, SupportsMultiModal):
+class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal):
     """MiniMax VL 模型，支持多模态处理"""
     
     def __init__(
@@ -1045,7 +1045,8 @@ class LlavaForConditionalGeneration(MiniMaxVL01Model, SupportsMultiModal):
         prefix: str = "",
     ) -> None:
         # 首先调用父类的初始化方法
-        super().__init__(
+        super().__init__()
+        self.model = MiniMaxVL01Model(
             config=config,
             quant_config=quant_config,
             cache_config=cache_config,
@@ -1096,48 +1097,16 @@ class LlavaForConditionalGeneration(MiniMaxVL01Model, SupportsMultiModal):
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.hidden_size,
-                self.vocab_size,
-                org_num_embeddings=self.vocab_size,
+                self.model.vocab_size,
+                org_num_embeddings=self.model.vocab_size,
                 bias=False,
             )
         else:
             self.lm_head = PPMissingLayer()
         
         # 为词汇嵌入和语言模型头设置自定义权重加载器
-        if get_pp_group().is_first_rank and hasattr(self, 'embed_tokens'):
-            self.embed_tokens.weight.weight_loader = self.embed_tokens_weight_loader
-            
         if get_pp_group().is_last_rank and hasattr(self, 'lm_head'):
             self.lm_head.weight.weight_loader = self.lm_head_weight_loader
-    
-    @staticmethod
-    def embed_tokens_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
-        """自定义的词汇嵌入权重加载器，处理词汇大小不匹配的情况"""
-        # 获取张量模型并行世界大小和排名
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        
-        # 检查维度兼容性
-        if param.dim() != loaded_weight.dim():
-            raise ValueError(f"Dimension mismatch: param dim {param.dim()}, loaded weight dim {loaded_weight.dim()}")
-        
-        # 检查隐藏维度是否匹配
-        if param.shape[-1] != loaded_weight.shape[-1]:
-            raise ValueError(f"Hidden size mismatch: param shape {param.shape}, loaded weight shape {loaded_weight.shape}")
-        
-        # 计算每个分片的大小
-        vocab_size = loaded_weight.shape[0]
-        shard_size = vocab_size // tp_size
-        
-        # 计算当前分片的范围
-        start_idx = tp_rank * shard_size
-        end_idx = min((tp_rank + 1) * shard_size, vocab_size)
-        
-        # 复制权重到参数
-        if start_idx < vocab_size:
-            # 确保我们只复制参数能容纳的部分
-            copy_size = min(end_idx - start_idx, param.shape[0])
-            param[:copy_size].data.copy_(loaded_weight[start_idx:start_idx + copy_size])
     
     @staticmethod
     def lm_head_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
@@ -1185,10 +1154,7 @@ class LlavaForConditionalGeneration(MiniMaxVL01Model, SupportsMultiModal):
 
     def make_empty_intermediate_tensors(self) -> IntermediateTensors:
         """创建空的中间张量，用于模型并行处理。"""
-        return IntermediateTensors({
-            "hidden_states": None,
-            "residual": None
-        })
+        return self.model.make_empty_intermediate_tensors()
     
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig, prefix: str = ""):
@@ -1215,38 +1181,6 @@ class LlavaForConditionalGeneration(MiniMaxVL01Model, SupportsMultiModal):
         # 处理图像输入
         return self._process_image_input(image_input)
     
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        """获取输入嵌入，包括文本和可能的视觉嵌入"""
-        # 获取文本嵌入
-        inputs_embeds = self.embed_scale * self.embed_tokens(input_ids)
-        
-        # 如果没有多模态嵌入，直接返回文本嵌入
-        if multimodal_embeddings is None:
-            return inputs_embeds
-            
-        # 如果有多模态嵌入，将其与文本嵌入合并
-        # 找到图像标记的位置
-        image_positions = (input_ids == self.image_token_id).nonzero(as_tuple=True)[0]
-        
-        if len(image_positions) == 0:
-            # 没有图像标记，直接返回文本嵌入
-            return inputs_embeds
-            
-        # 替换图像标记位置的嵌入
-        for i, pos in enumerate(image_positions):
-            if i < len(multimodal_embeddings):
-                # 获取当前图像的嵌入
-                image_embedding = multimodal_embeddings[i:i+1]
-                
-                # 替换文本嵌入中的图像标记
-                inputs_embeds[pos:pos+1] = image_embedding
-                
-        return inputs_embeds
-    
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -1263,10 +1197,27 @@ class LlavaForConditionalGeneration(MiniMaxVL01Model, SupportsMultiModal):
             # 只有在有视觉塔的情况下才获取多模态嵌入
             if self.has_vision_tower:
                 multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
-                inputs_embeds = self.get_input_embeddings(input_ids, multimodal_embeddings)
-                input_ids = None
+                if input_ids is not None and multimodal_embeddings is not None:
+                    # 获取文本嵌入
+                    inputs_embeds = self.model.embed_scale * self.model.embed_tokens(input_ids)
+                    
+                    # 找到图像标记的位置
+                    if self.image_token_id is not None:
+                        image_positions = (input_ids == self.image_token_id).nonzero(as_tuple=True)[0]
+                        
+                        if len(image_positions) > 0:
+                            # 替换图像标记位置的嵌入
+                            for i, pos in enumerate(image_positions):
+                                if i < len(multimodal_embeddings):
+                                    # 获取当前图像的嵌入
+                                    image_embedding = multimodal_embeddings[i:i+1]
+                                    
+                                    # 替换文本嵌入中的图像标记
+                                    inputs_embeds[pos:pos+1] = image_embedding
+                                    
+                    input_ids = None
             
-        return super().forward(
+        return self.model(
             input_ids=input_ids, 
             positions=positions, 
             kv_caches=kv_caches,
@@ -1298,106 +1249,51 @@ class LlavaForConditionalGeneration(MiniMaxVL01Model, SupportsMultiModal):
     
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         """自定义权重加载函数，处理权重路径映射问题"""
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
+        loaded_params = set()
         
-        # 创建参数字典
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: Set[str] = set()
+        # 首先加载模型主体的权重
+        model_weights = [(name, weight) for name, weight in weights 
+                         if not name.startswith("lm_head") and 
+                            not name.startswith("vision_tower") and 
+                            not name.startswith("multi_modal_projector")]
+        loaded_params.update(self.model.load_weights(model_weights))
         
-        # 创建权重名称映射
-        name_mapping = {
-            "model.embed_tokens.weight": "embed_tokens.weight",
-            "model.norm.weight": "norm.weight",
-            "lm_head.weight": "lm_head.weight"
-        }
-        
-        # 记录调试信息
-        if OPEN_DEBUG:
-            print(f"Model has {len(params_dict)} parameters")
-            print(f"Loading {len(list(weights))} weights")
-        
-        # 特殊处理lm_head权重
-        lm_head_weight = None
-        lm_head_name = None
-        
-        for name, loaded_weight in weights:
-            # 检查是否是lm_head权重
-            if "lm_head.weight" in name:
-                lm_head_weight = loaded_weight
-                lm_head_name = name
-                continue
-            
-            # 检查是否需要重新映射名称
-            mapped_name = name
-            for old_name, new_name in name_mapping.items():
-                if name == old_name or name.endswith(old_name):
-                    mapped_name = name.replace(old_name, new_name)
-                    break
-            
-            # 处理堆叠参数
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
-                if weight_name not in mapped_name:
-                    continue
-                mapped_name = mapped_name.replace(weight_name, param_name)
-                
-                # 跳过不存在的参数
-                if mapped_name not in params_dict:
-                    if OPEN_DEBUG:
-                        print(f"Skipping {mapped_name} (not found in model)")
-                    continue
-                
-                param = params_dict[mapped_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                try:
-                    weight_loader(param, loaded_weight, shard_id)
-                    loaded_params.add(mapped_name)
-                except Exception as e:
-                    if OPEN_DEBUG:
-                        print(f"Error loading {mapped_name}: {e}")
-                        print(f"Param shape: {param.shape}, Weight shape: {loaded_weight.shape}")
-                    raise
-                break
-            else:
-                # 处理专家参数映射
-                if "rotary_emb.inv_freq" in mapped_name:
-                    continue
-                
-                # 跳过不存在的参数
-                if mapped_name not in params_dict:
-                    if OPEN_DEBUG:
-                        print(f"Skipping {mapped_name} (not found in model)")
-                    continue
-                
-                param = params_dict[mapped_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+        # 加载lm_head的权重
+        if get_pp_group().is_last_rank and hasattr(self, 'lm_head'):
+            lm_head_weights = [(name, weight) for name, weight in weights if name.startswith("lm_head")]
+            for name, loaded_weight in lm_head_weights:
+                param = self.lm_head.weight
+                weight_loader = getattr(param, "weight_loader", self.lm_head_weight_loader)
                 try:
                     weight_loader(param, loaded_weight)
-                    loaded_params.add(mapped_name)
+                    loaded_params.add("lm_head.weight")
                 except Exception as e:
                     if OPEN_DEBUG:
-                        print(f"Error loading {mapped_name}: {e}")
+                        print(f"Error loading lm_head.weight: {e}")
                         print(f"Param shape: {param.shape}, Weight shape: {loaded_weight.shape}")
                     raise
         
-        # 特殊处理lm_head权重
-        if lm_head_weight is not None and "lm_head.weight" in params_dict:
-            param = params_dict["lm_head.weight"]
-            weight_loader = getattr(param, "weight_loader", self.lm_head_weight_loader)
+        # 加载视觉塔和多模态投影器的权重
+        if self.has_vision_tower:
+            vision_weights = [(name.replace("vision_tower.", ""), weight) 
+                             for name, weight in weights if name.startswith("vision_tower")]
+            # 如果有视觉塔权重，加载它们
+            if vision_weights:
+                # 假设视觉塔有自己的加载权重方法
+                # 这里需要根据实际实现进行调整
+                for name, weight in vision_weights:
+                    # 加载视觉塔权重的逻辑
+                    pass
             
-            try:
-                # 使用自定义的权重加载器
-                weight_loader(param, lm_head_weight)
-                loaded_params.add("lm_head.weight")
-            except Exception as e:
-                if OPEN_DEBUG:
-                    print(f"Error loading lm_head.weight: {e}")
-                    print(f"Param shape: {param.shape}, Weight shape: {lm_head_weight.shape}")
-                raise
+            projector_weights = [(name.replace("multi_modal_projector.", ""), weight) 
+                                for name, weight in weights if name.startswith("multi_modal_projector")]
+            # 如果有投影器权重，加载它们
+            if projector_weights:
+                # 假设投影器有自己的加载权重方法
+                # 这里需要根据实际实现进行调整
+                for name, weight in projector_weights:
+                    # 加载投影器权重的逻辑
+                    pass
         
         return loaded_params
 
@@ -1448,7 +1344,7 @@ class LlavaForConditionalGeneration(MiniMaxVL01Model, SupportsMultiModal):
         
         return image_embeds
 
-
+# 重新添加必要的类
 class MinimaxVLLayerNorm(nn.Module):
     """视觉模型的标准化层"""
     
@@ -1676,17 +1572,16 @@ class MinimaxVLImageProcessor:
         # 这里简单返回None作为占位符
         return None
 
-
-class MinimaxVLProcessingInfo:
-    """处理信息类，提供处理器所需的配置信息"""
-    
-    def __init__(self, ctx):
-        self.ctx = ctx
-        
-    def get_tokenizer(self):
-        """获取分词器"""
-        return self.ctx.get_tokenizer()
-        
-    def get_hf_config(self):
-        """获取HuggingFace配置"""
-        return self.ctx.get_hf_config()
+# 确保类导出
+__all__ = [
+    "MiniMaxVL01ForConditionalGeneration",
+    "MinimaxVLVisualEmbedding",
+    "MinimaxVLVisionTransformer",
+    "MinimaxVLMultiModalProjector",
+    "MinimaxVLLayerNorm",
+    "MinimaxVLAttention",
+    "MinimaxVLMLP",
+    "MinimaxVLEncoderLayer",
+    "MinimaxVLImageProcessor",
+    "MiniMaxVL01Model"
+]
