@@ -37,7 +37,7 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import maybe_prefix, AutoWeightsLoader, WeightsMapper
+from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
@@ -1054,124 +1054,158 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                         device=device),
         })
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> None:
-        from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
-        import re
-        
-        # 定义权重映射规则
-        mapper = WeightsMapper(orig_to_new_substr={
-            "q_proj": "qkv_proj",
-            "k_proj": "qkv_proj",
-            "v_proj": "qkv_proj",
-            "gate_proj": "gate_up_proj",
-            "up_proj": "gate_up_proj",
-            "down_proj": "down_proj",
-            "w1.weight": "w13_weight",
-            "w3.weight": "w13_weight",
-            "w2.weight": "w2_weight",
-            "w1.weight_scale": "w13_scale",
-            "w3.weight_scale": "w13_scale",
-            "w2.weight_scale": "w2_scale",
-        })
-        
-        # 过滤权重
-        filtered_weights = []
-        for name, weight in weights:
-            # 跳过 rotary_emb.inv_freq
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> None:
+        params_dict = dict(self.named_parameters())
+
+        def which_layer(name: str) -> int:
+            if "layers" in name:
+                after_layer = name.split("layers")[-1]
+                return int(after_layer.split(".")[1])
+            return None
+
+        def is_linear_attn_layer(layer_idx: int) -> bool:
+            if layer_idx is None or not hasattr(self.config, "attn_type_list"):
+                return False
+            return self.config.attn_type_list[layer_idx] == 0
+
+        def get_expert_id(param_name):
+            pattern = r'model\.layers\.\d+\.block_sparse_moe\.experts\.(\d+)\.'
+            match = re.search(pattern, param_name)
+            if match:
+                return match.group(1)
+            return None
+
+        def load_weight(name: str, loaded_weight: torch.Tensor) -> None:
+            if is_pp_missing_parameter(name, self):
+                return
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader = weight_loader_with_alias(name)(weight_loader)
+            weight_loader(param, loaded_weight)
+
+        def load_moe_weight(name: str, loaded_weight: torch.Tensor) -> None:
+            if isinstance(self.config.num_local_experts, list):
+                expert_params_mapping = [
+                    ("w13_weight" if weight_name in ["w1", "w3"] else "w2_weight",
+                     f"experts.{expert_id}.{weight_name}.weight", expert_id)
+                    for expert_id in range(max(self.config.num_local_experts))
+                    for weight_name in ["w1", "w2", "w3"]
+                ]
+            else:
+                expert_params_mapping = [
+                    ("w13_scale" if weight_name in ["w1", "w3"] else "w2_scale",
+                     f"{expert_id}.{weight_name}.weight_scale", expert_id, weight_name)
+                    for expert_id in range(self.config.num_local_experts)
+                    for weight_name in ["w1", "w2", "w3"]
+                ] + [
+                    ("w13_weight" if weight_name in ["w1", "w3"] else "w2_weight",
+                     f"{expert_id}.{weight_name}.weight", expert_id, weight_name)
+                    for expert_id in range(self.config.num_local_experts)
+                    for weight_name in ["w1", "w2", "w3"]
+                ]
+
+            for param_name, weight_name, expert_id, *rest in expert_params_mapping:
+                name_expert_id = get_expert_id(name)
+                if name_expert_id is not None and int(name_expert_id) != int(expert_id):
+                    continue
+                if weight_name not in name:
+                    continue
+                
+                name = name.replace(weight_name, param_name)
+                if is_pp_missing_parameter(name, self):
+                    return
+                
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader = weight_loader_with_alias(name)(weight_loader)
+                if rest:
+                    weight_loader(param, loaded_weight, weight_name, expert_id=expert_id, shard_id=rest[0])
+                else:
+                    weight_loader(param, loaded_weight, weight_name, expert_id=expert_id)
+                break
+            else:
+                load_weight(name, loaded_weight)
+
+        def load_mlp_weight(name: str, loaded_weight: torch.Tensor) -> None:
+            if not self.CONCAT_FFN:
+                if "gate_proj" in name:
+                    name = name.replace("gate_proj", "w1", 1)
+                elif "up_proj" in name:
+                    name = name.replace("up_proj", "w3", 1)
+                elif "down_proj" in name:
+                    name = name.replace("down_proj", "w2", 1)
+            else:
+                if "gate_proj" in name:
+                    name = name.replace("gate_proj", "gate_up_proj", 1)
+                    loaded_shard_id = 0
+                elif "up_proj" in name:
+                    name = name.replace("up_proj", "gate_up_proj", 1)
+                    loaded_shard_id = 1
+
+            if is_pp_missing_parameter(name, self):
+                return
+            
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader = weight_loader_with_alias(name)(weight_loader)
+            
+            if not self.CONCAT_FFN:
+                weight_loader(param, loaded_weight)
+            else:
+                if "gate_up_proj" in name:
+                    weight_loader(param, loaded_weight, loaded_shard_id)
+                elif "down_proj" in name:
+                    weight_loader(param, loaded_weight)
+                else:
+                    raise AssertionError("MLP weight not in [gate_up_proj, down_proj]")
+
+        def load_attention_weight(name: str, loaded_weight: torch.Tensor, layer_idx: int) -> None:
+            if is_linear_attn_layer(layer_idx):
+                if is_pp_missing_parameter(name, self):
+                    return
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", MiniMaxText01LinearAttention.weight_direct_load)
+                weight_loader = weight_loader_with_alias(name)(weight_loader)
+                weight_loader(param, loaded_weight)
+            else:
+                flash_mha_params_mapping = [
+                    ("qkv_proj", "q_proj", "q"),
+                    ("qkv_proj", "k_proj", "k"),
+                    ("qkv_proj", "v_proj", "v"),
+                    ("gate_up_proj", "gate_proj", 0),
+                    ("gate_up_proj", "up_proj", 1),
+                ]
+                
+                for param_name, weight_name, shard_id in flash_mha_params_mapping:
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    if is_pp_missing_parameter(name, self):
+                        return
+                    param = params_dict[name]
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    weight_loader = weight_loader_with_alias(name)(weight_loader)
+                    weight_loader(param, loaded_weight, shard_id)
+                    break
+                else:
+                    load_weight(name, loaded_weight)
+
+        for name, loaded_weight in weights:
+            weight_at_layer = which_layer(name)
+            if weight_at_layer and weight_at_layer >= len(self.config.attn_type_list):
+                continue
+
             if "rotary_emb.inv_freq" in name:
                 continue
-                
-            # 检查层索引是否超出范围
-            layer_idx = None
-            if "layers" in name:
-                try:
-                    after_layer = name.split("layers")[-1]
-                    layer_idx = int(after_layer.split(".")[1])
-                    if layer_idx >= len(self.config.attn_type_list):
-                        continue
-                except (IndexError, ValueError):
-                    pass
-            
-            # 处理 MoE 权重
-            if "block_sparse_moe" in name and not name.endswith(".bias"):
-                expert_id_match = re.search(r'experts\.(\d+)\.', name)
-                if expert_id_match:
-                    if "w1.weight" in name or "w3.weight" in name:
-                        new_name = name.replace("w1.weight", "w13_weight").replace("w3.weight", "w13_weight")
-                    elif "w2.weight" in name:
-                        new_name = name.replace("w2.weight", "w2_weight")
-                    elif "w1.weight_scale" in name or "w3.weight_scale" in name:
-                        new_name = name.replace("w1.weight_scale", "w13_scale").replace("w3.weight_scale", "w13_scale")
-                    elif "w2.weight_scale" in name:
-                        new_name = name.replace("w2.weight_scale", "w2_scale")
-                    else:
-                        new_name = name
-                    
-                    filtered_weights.append((new_name, weight))
-                    continue
-            
-            # 处理线性注意力权重
-            if "self_attn" in name and not name.endswith(".bias") and layer_idx is not None:
-                if hasattr(self.config, "attn_type_list") and self.config.attn_type_list[layer_idx] == 0:
-                    filtered_weights.append((name, weight))
-                    continue
-            
-            # 处理共享 MLP 权重
-            if "shared_mlp" in name and not name.endswith(".bias"):
-                if not self.CONCAT_FFN:
-                    if "gate_proj" in name:
-                        new_name = name.replace("gate_proj", "w1", 1)
-                    elif "up_proj" in name:
-                        new_name = name.replace("up_proj", "w3", 1)
-                    elif "down_proj" in name:
-                        new_name = name.replace("down_proj", "w2", 1)
-                    else:
-                        new_name = name
-                else:
-                    if "gate_proj" in name:
-                        new_name = name.replace("gate_proj", "gate_up_proj", 1)
-                    elif "up_proj" in name:
-                        new_name = name.replace("up_proj", "gate_up_proj", 1)
-                    else:
-                        new_name = name
-                
-                filtered_weights.append((new_name, weight))
-                continue
-            
-            # 处理层归一化权重
-            if "norm" in name and not name.endswith(".bias"):
-                filtered_weights.append((name, weight))
-                continue
-            
-            # 处理基本权重
-            if not name.endswith(".bias"):
-                filtered_weights.append((name, weight))
-                continue
-            
-            # 处理偏置项
-            if name.endswith(".bias"):
-                filtered_weights.append((name, weight))
-                continue
-            
-            filtered_weights.append((name, weight))
-        
-        # 使用 AutoWeightsLoader 加载权重
-        loader = AutoWeightsLoader(self)
-        try:
-            autoloaded_weights = loader.load_weights(filtered_weights, mapper=mapper)
-            
-            # 检查缺失的参数
-            missing_params = set()
-            for name, _ in self.named_parameters():
-                if name not in autoloaded_weights:
-                    missing_params.add(name)
-            
-            if missing_params:
-                print(f"Warning: The following parameters are missing: {missing_params}")
-            
-        except Exception as e:
-            print(f"Error loading weights: {e}")
-            raise
-        
+
+            if "norm" in name and not name.endswith(".bias") and name in params_dict:
+                load_weight(name, loaded_weight)
+            elif "self_attn" in name and not name.endswith(".bias"):
+                load_attention_weight(name, loaded_weight, weight_at_layer)
+            elif "block_sparse_moe" in name and not name.endswith(".bias"):
+                load_moe_weight(name, loaded_weight)
+            elif "shared_mlp" in name and not name.endswith(".bias"):
+                load_mlp_weight(name, loaded_weight)
+            else:
+                load_weight(name, loaded_weight)
         return
