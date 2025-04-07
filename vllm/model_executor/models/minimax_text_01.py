@@ -1079,6 +1079,11 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                     param_name = "w13_weight" if weight_name in ["w1", "w3"] else "w2_weight"
                     orig_to_new_substr[f"model.layers.0.block_sparse_moe.{expert_id}.{weight_name}.weight"] = f"model.layers.0.block_sparse_moe.{param_name}"
         
+        # 添加experts子模块的映射规则
+        orig_to_new_substr.update({
+            "model.layers.0.block_sparse_moe.experts.0": "model.layers.0.block_sparse_moe.experts",
+        })
+        
         # MLP 权重映射
         if self.CONCAT_FFN:
             orig_to_new_substr.update({
