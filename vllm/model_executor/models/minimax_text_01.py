@@ -1060,82 +1060,91 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
         # 创建权重映射规则
         orig_to_new_substr = {}
         
-        # MoE 权重映射
-        if isinstance(self.config.num_local_experts, list):
-            for expert_id in range(max(self.config.num_local_experts)):
-                for weight_name in ["w1", "w2", "w3"]:
-                    param_name = "w13_weight" if weight_name in ["w1", "w3"] else "w2_weight"
-                    orig_to_new_substr[f"model.layers.0.block_sparse_moe.{expert_id}.{weight_name}.weight"] = f"model.layers.0.block_sparse_moe.{param_name}"
-                    # 添加 scale 映射
-                    scale_name = "w13_scale" if weight_name in ["w1", "w3"] else "w2_scale"
-                    orig_to_new_substr[f"model.layers.0.block_sparse_moe.{expert_id}.{weight_name}.weight_scale"] = f"model.layers.0.block_sparse_moe.{scale_name}"
-        else:
-            for expert_id in range(self.config.num_local_experts):
-                for weight_name in ["w1", "w2", "w3"]:
-                    # weight_scale 映射
-                    scale_name = "w13_scale" if weight_name in ["w1", "w3"] else "w2_scale"
-                    orig_to_new_substr[f"model.layers.0.block_sparse_moe.{expert_id}.{weight_name}.weight_scale"] = f"model.layers.0.block_sparse_moe.{scale_name}"
-                    # weight 映射
-                    param_name = "w13_weight" if weight_name in ["w1", "w3"] else "w2_weight"
-                    orig_to_new_substr[f"model.layers.0.block_sparse_moe.{expert_id}.{weight_name}.weight"] = f"model.layers.0.block_sparse_moe.{param_name}"
-        
-        # 添加experts子模块的映射规则
-        orig_to_new_substr.update({
-            "model.layers.0.block_sparse_moe.experts.0": "model.layers.0.block_sparse_moe.experts",
-            "model.layers.0.block_sparse_moe.experts.w1": "model.layers.0.block_sparse_moe.w13_weight",
-            "model.layers.0.block_sparse_moe.experts.w2": "model.layers.0.block_sparse_moe.w2_weight",
-            "model.layers.0.block_sparse_moe.experts.w3": "model.layers.0.block_sparse_moe.w13_weight",
-            # 添加嵌套权重的映射规则
-            "model.layers.0.block_sparse_moe.experts.w13_weight.weight": "model.layers.0.block_sparse_moe.experts.w13_weight",
-            "model.layers.0.block_sparse_moe.experts.w2_weight.weight": "model.layers.0.block_sparse_moe.experts.w2_weight",
-        })
-        
-        # 添加直接的权重映射规则
-        orig_to_new_substr.update({
-            "model.layers.0.block_sparse_moe.w13_weight": "model.layers.0.block_sparse_moe.experts.w13_weight",
-            "model.layers.0.block_sparse_moe.w2_weight": "model.layers.0.block_sparse_moe.experts.w2_weight",
-            # 添加嵌套权重的映射规则
-            "model.layers.0.block_sparse_moe.w13_weight.weight": "model.layers.0.block_sparse_moe.experts.w13_weight",
-            "model.layers.0.block_sparse_moe.w2_weight.weight": "model.layers.0.block_sparse_moe.experts.w2_weight",
-        })
-        
-        # MLP 权重映射
-        if self.CONCAT_FFN:
+        # MoE 权重映射 - 处理所有层
+        for layer_idx in range(self.config.num_hidden_layers):
+            if isinstance(self.config.num_local_experts, list):
+                for expert_id in range(max(self.config.num_local_experts)):
+                    for weight_name in ["w1", "w2", "w3"]:
+                        param_name = "w13_weight" if weight_name in ["w1", "w3"] else "w2_weight"
+                        orig_to_new_substr[f"model.layers.{layer_idx}.block_sparse_moe.{expert_id}.{weight_name}.weight"] = f"model.layers.{layer_idx}.block_sparse_moe.{param_name}"
+                        # 添加 scale 映射
+                        scale_name = "w13_scale" if weight_name in ["w1", "w3"] else "w2_scale"
+                        orig_to_new_substr[f"model.layers.{layer_idx}.block_sparse_moe.{expert_id}.{weight_name}.weight_scale"] = f"model.layers.{layer_idx}.block_sparse_moe.{scale_name}"
+            else:
+                for expert_id in range(self.config.num_local_experts):
+                    for weight_name in ["w1", "w2", "w3"]:
+                        # weight_scale 映射
+                        scale_name = "w13_scale" if weight_name in ["w1", "w3"] else "w2_scale"
+                        orig_to_new_substr[f"model.layers.{layer_idx}.block_sparse_moe.{expert_id}.{weight_name}.weight_scale"] = f"model.layers.{layer_idx}.block_sparse_moe.{scale_name}"
+                        # weight 映射
+                        param_name = "w13_weight" if weight_name in ["w1", "w3"] else "w2_weight"
+                        orig_to_new_substr[f"model.layers.{layer_idx}.block_sparse_moe.{expert_id}.{weight_name}.weight"] = f"model.layers.{layer_idx}.block_sparse_moe.{param_name}"
+            
+            # 添加experts子模块的映射规则
             orig_to_new_substr.update({
-                "model.layers.0.mlp.gate_proj.weight": "model.layers.0.mlp.gate_up_proj.weight",
-                "model.layers.0.mlp.up_proj.weight": "model.layers.0.mlp.gate_up_proj.weight",
-                "model.layers.0.mlp.down_proj.weight": "model.layers.0.mlp.w2.weight",
+                f"model.layers.{layer_idx}.block_sparse_moe.experts.0": f"model.layers.{layer_idx}.block_sparse_moe.experts",
+                f"model.layers.{layer_idx}.block_sparse_moe.experts.w1": f"model.layers.{layer_idx}.block_sparse_moe.w13_weight",
+                f"model.layers.{layer_idx}.block_sparse_moe.experts.w2": f"model.layers.{layer_idx}.block_sparse_moe.w2_weight",
+                f"model.layers.{layer_idx}.block_sparse_moe.experts.w3": f"model.layers.{layer_idx}.block_sparse_moe.w13_weight",
+                # 添加嵌套权重的映射规则
+                f"model.layers.{layer_idx}.block_sparse_moe.experts.w13_weight.weight": f"model.layers.{layer_idx}.block_sparse_moe.experts.w13_weight",
+                f"model.layers.{layer_idx}.block_sparse_moe.experts.w2_weight.weight": f"model.layers.{layer_idx}.block_sparse_moe.experts.w2_weight",
             })
-        else:
+            
+            # 添加直接的权重映射规则
             orig_to_new_substr.update({
-                "model.layers.0.mlp.gate_proj.weight": "model.layers.0.mlp.w1.weight",
-                "model.layers.0.mlp.up_proj.weight": "model.layers.0.mlp.w3.weight",
-                "model.layers.0.mlp.down_proj.weight": "model.layers.0.mlp.w2.weight",
+                f"model.layers.{layer_idx}.block_sparse_moe.w13_weight": f"model.layers.{layer_idx}.block_sparse_moe.experts.w13_weight",
+                f"model.layers.{layer_idx}.block_sparse_moe.w2_weight": f"model.layers.{layer_idx}.block_sparse_moe.experts.w2_weight",
+                # 添加嵌套权重的映射规则
+                f"model.layers.{layer_idx}.block_sparse_moe.w13_weight.weight": f"model.layers.{layer_idx}.block_sparse_moe.experts.w13_weight",
+                f"model.layers.{layer_idx}.block_sparse_moe.w2_weight.weight": f"model.layers.{layer_idx}.block_sparse_moe.experts.w2_weight",
             })
-        
-        # Attention 权重映射
-        if self.config.attn_type_list[0] == 0:  # linear attention
+            
+            # MLP 权重映射
+            if self.CONCAT_FFN:
+                orig_to_new_substr.update({
+                    f"model.layers.{layer_idx}.mlp.gate_proj.weight": f"model.layers.{layer_idx}.mlp.gate_up_proj.weight",
+                    f"model.layers.{layer_idx}.mlp.up_proj.weight": f"model.layers.{layer_idx}.mlp.gate_up_proj.weight",
+                    f"model.layers.{layer_idx}.mlp.down_proj.weight": f"model.layers.{layer_idx}.mlp.w2.weight",
+                })
+            else:
+                orig_to_new_substr.update({
+                    f"model.layers.{layer_idx}.mlp.gate_proj.weight": f"model.layers.{layer_idx}.mlp.w1.weight",
+                    f"model.layers.{layer_idx}.mlp.up_proj.weight": f"model.layers.{layer_idx}.mlp.w3.weight",
+                    f"model.layers.{layer_idx}.mlp.down_proj.weight": f"model.layers.{layer_idx}.mlp.w2.weight",
+                })
+            
+            # Attention 权重映射
+            if self.config.attn_type_list[layer_idx] == 0:  # linear attention
+                orig_to_new_substr.update({
+                    f"model.layers.{layer_idx}.self_attn.qkv_proj.weight": f"model.layers.{layer_idx}.self_attn.qkv_proj.weight",
+                })
+            else:  # flash attention
+                orig_to_new_substr.update({
+                    f"model.layers.{layer_idx}.self_attn.q_proj.weight": f"model.layers.{layer_idx}.self_attn.qkv_proj.weight",
+                    f"model.layers.{layer_idx}.self_attn.k_proj.weight": f"model.layers.{layer_idx}.self_attn.qkv_proj.weight",
+                    f"model.layers.{layer_idx}.self_attn.v_proj.weight": f"model.layers.{layer_idx}.self_attn.qkv_proj.weight",
+                })
+            
+            # 添加 gate 权重映射
             orig_to_new_substr.update({
-                "model.layers.0.self_attn.qkv_proj.weight": "model.layers.0.self_attn.qkv_proj.weight",
+                f"model.layers.{layer_idx}.block_sparse_moe.gate.weight": f"model.layers.{layer_idx}.block_sparse_moe.gate.weight",
             })
-        else:  # flash attention
-            orig_to_new_substr.update({
-                "model.layers.0.self_attn.q_proj.weight": "model.layers.0.self_attn.qkv_proj.weight",
-                "model.layers.0.self_attn.k_proj.weight": "model.layers.0.self_attn.qkv_proj.weight",
-                "model.layers.0.self_attn.v_proj.weight": "model.layers.0.self_attn.qkv_proj.weight",
-            })
-        
-        # 添加 gate 权重映射
-        orig_to_new_substr.update({
-            "model.layers.0.block_sparse_moe.gate.weight": "model.layers.0.block_sparse_moe.gate.weight",
-        })
         
         mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
+        
+        # 创建需要忽略的嵌套权重前缀列表
+        ignore_prefixes = []
+        for layer_idx in range(self.config.num_hidden_layers):
+            ignore_prefixes.extend([
+                f"model.layers.{layer_idx}.block_sparse_moe.experts.w13_weight.weight",
+                f"model.layers.{layer_idx}.block_sparse_moe.experts.w2_weight.weight"
+            ])
         
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=["rotary_emb.inv_freq"],
-            ignore_unexpected_prefixes=["model.layers.0.block_sparse_moe.experts.w13_weight.weight", "model.layers.0.block_sparse_moe.experts.w2_weight.weight"]
+            ignore_unexpected_prefixes=ignore_prefixes
         )
         
         # 加载权重
