@@ -827,7 +827,7 @@ class MiniMaxText01Model(nn.Module):
 
         linear_layer_nums = sum(1 for i in range(config.num_hidden_layers)
                                 if self.decoder_attention_types[i] == 0)
-        max_slots_number = scheduler_config.max_num_seqs
+        max_slots_number = min(scheduler_config.max_num_seqs, 32)
         self.cache_shape = (linear_layer_nums, max_slots_number,
                             config.num_attention_heads //
                             get_tensor_model_parallel_world_size(),
@@ -836,6 +836,9 @@ class MiniMaxText01Model(nn.Module):
         self._dtype = _dummy.dtype
         del _dummy
 
+        if self._dtype == torch.float32:
+            self._dtype = torch.float16
+            
         self.minimax_cache = MinimaxCacheManager(dtype=self._dtype,
                                                  cache_shape=self.cache_shape)
 
