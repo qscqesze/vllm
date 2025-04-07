@@ -1078,9 +1078,16 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         """使用 AutoWeightsLoader 加载权重，简化权重加载逻辑"""
+        processed_weights = []
+        for name, tensor in weights:
+            if re.match(r'.*block_sparse_moe\.experts\.\d+.*', name):
+                new_name = re.sub(r'block_sparse_moe\.experts\.\d+', 'block_sparse_moe.experts', name)
+                processed_weights.append((new_name, tensor))
+            else:
+                processed_weights.append((name, tensor))
+                
         loader = AutoWeightsLoader(
             self,
-            # 跳过不需要加载的权重
             skip_prefixes=["rotary_emb.inv_freq"],
         )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(processed_weights, mapper=self.hf_to_vllm_mapper)
