@@ -971,7 +971,7 @@ class MiniMaxWeightsMapper(WeightsMapper):
             "o_proj": "o_proj",
             "gate_proj": "gate_up_proj",
             "up_proj": "gate_up_proj",
-            "experts": "block_sparse_moe.experts",
+            "experts": "experts",
             "shared_mlp": "shared_mlp",
             "norm": "norm",
             "input_layernorm": "input_layernorm",
