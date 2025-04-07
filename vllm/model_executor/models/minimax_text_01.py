@@ -1134,7 +1134,8 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
         
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=["rotary_emb.inv_freq"]
+            skip_prefixes=["rotary_emb.inv_freq"],
+            ignore_unexpected_prefixes=["model.layers.0.block_sparse_moe.experts.w13_weight.weight", "model.layers.0.block_sparse_moe.experts.w2_weight.weight"]
         )
         
         # 加载权重
