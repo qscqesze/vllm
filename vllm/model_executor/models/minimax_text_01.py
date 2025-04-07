@@ -1066,6 +1066,9 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                 for weight_name in ["w1", "w2", "w3"]:
                     param_name = "w13_weight" if weight_name in ["w1", "w3"] else "w2_weight"
                     orig_to_new_substr[f"model.layers.0.block_sparse_moe.experts.{expert_id}.{weight_name}.weight"] = f"model.layers.0.block_sparse_moe.{param_name}"
+                    # 添加 scale 映射
+                    scale_name = "w13_scale" if weight_name in ["w1", "w3"] else "w2_scale"
+                    orig_to_new_substr[f"model.layers.0.block_sparse_moe.experts.{expert_id}.{weight_name}.weight_scale"] = f"model.layers.0.block_sparse_moe.{scale_name}"
         else:
             for expert_id in range(self.config.num_local_experts):
                 for weight_name in ["w1", "w2", "w3"]:
@@ -1101,6 +1104,11 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                 "model.layers.0.self_attn.k_proj.weight": "model.layers.0.self_attn.qkv_proj.weight",
                 "model.layers.0.self_attn.v_proj.weight": "model.layers.0.self_attn.qkv_proj.weight",
             })
+        
+        # 添加 gate 权重映射
+        orig_to_new_substr.update({
+            "model.layers.0.block_sparse_moe.gate.weight": "model.layers.0.block_sparse_moe.gate.weight",
+        })
         
         mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
         
