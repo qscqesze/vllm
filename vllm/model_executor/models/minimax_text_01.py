@@ -976,6 +976,12 @@ class MiniMaxWeightsMapper(WeightsMapper):
             "norm": "norm",
             "input_layernorm": "input_layernorm",
             "post_attention_layernorm": "post_attention_layernorm",
+            "block_sparse_moe": "block_sparse_moe",
+            "gate": "gate",
+            "w13_weight": "w13_weight",
+            "w2_weight": "w2_weight",
+            "w13_scale": "w13_scale",
+            "w2_scale": "w2_scale",
         })
 
 
