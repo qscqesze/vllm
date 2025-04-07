@@ -37,7 +37,7 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import maybe_prefix, AutoWeightsLoader, WeightsMapper
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
@@ -1054,121 +1054,124 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                         device=device),
         })
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> None:
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> None:
         from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
-        from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
+        import re
         
-        # 获取张量并行大小
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
+        # 定义权重映射规则
+        mapper = WeightsMapper(orig_to_new_substr={
+            "q_proj": "qkv_proj",
+            "k_proj": "qkv_proj",
+            "v_proj": "qkv_proj",
+            "gate_proj": "gate_up_proj",
+            "up_proj": "gate_up_proj",
+            "down_proj": "down_proj",
+            "w1.weight": "w13_weight",
+            "w3.weight": "w13_weight",
+            "w2.weight": "w2_weight",
+            "w1.weight_scale": "w13_scale",
+            "w3.weight_scale": "w13_scale",
+            "w2.weight_scale": "w2_scale",
+        })
         
-        # 创建权重映射规则
-        orig_to_new_substr = {}
-        
-        # MoE 权重映射 - 处理所有层
-        for layer_idx in range(self.config.num_hidden_layers):
-            # 处理专家权重
-            num_experts = (max(self.config.num_local_experts) 
-                         if isinstance(self.config.num_local_experts, list) 
-                         else self.config.num_local_experts)
+        # 过滤权重
+        filtered_weights = []
+        for name, weight in weights:
+            # 跳过 rotary_emb.inv_freq
+            if "rotary_emb.inv_freq" in name:
+                continue
+                
+            # 检查层索引是否超出范围
+            layer_idx = None
+            if "layers" in name:
+                try:
+                    after_layer = name.split("layers")[-1]
+                    layer_idx = int(after_layer.split(".")[1])
+                    if layer_idx >= len(self.config.attn_type_list):
+                        continue
+                except (IndexError, ValueError):
+                    pass
             
-            # 添加专家权重映射
-            for expert_id in range(num_experts):
-                for weight_name in ["w1", "w2", "w3"]:
-                    param_name = "w13_weight" if weight_name in ["w1", "w3"] else "w2_weight"
-                    scale_name = "w13_scale" if weight_name in ["w1", "w3"] else "w2_scale"
+            # 处理 MoE 权重
+            if "block_sparse_moe" in name and not name.endswith(".bias"):
+                expert_id_match = re.search(r'experts\.(\d+)\.', name)
+                if expert_id_match:
+                    if "w1.weight" in name or "w3.weight" in name:
+                        new_name = name.replace("w1.weight", "w13_weight").replace("w3.weight", "w13_weight")
+                    elif "w2.weight" in name:
+                        new_name = name.replace("w2.weight", "w2_weight")
+                    elif "w1.weight_scale" in name or "w3.weight_scale" in name:
+                        new_name = name.replace("w1.weight_scale", "w13_scale").replace("w3.weight_scale", "w13_scale")
+                    elif "w2.weight_scale" in name:
+                        new_name = name.replace("w2.weight_scale", "w2_scale")
+                    else:
+                        new_name = name
                     
-                    # 添加权重映射
-                    orig_to_new_substr[f"model.layers.{layer_idx}.block_sparse_moe.{expert_id}.{weight_name}.weight"] = f"model.layers.{layer_idx}.block_sparse_moe.{param_name}"
-                    # 添加 scale 映射
-                    orig_to_new_substr[f"model.layers.{layer_idx}.block_sparse_moe.{expert_id}.{weight_name}.weight_scale"] = f"model.layers.{layer_idx}.block_sparse_moe.{scale_name}"
+                    filtered_weights.append((new_name, weight))
+                    continue
             
-            # 添加 experts 子模块的映射规则
-            experts_mappings = {
-                "experts.0": "experts",
-                "experts.w1": "w13_weight",
-                "experts.w2": "w2_weight",
-                "experts.w3": "w13_weight",
-                "experts.w13_weight.weight": "experts.w13_weight",
-                "experts.w2_weight.weight": "experts.w2_weight",
-            }
-            for src, dst in experts_mappings.items():
-                orig_to_new_substr[f"model.layers.{layer_idx}.block_sparse_moe.{src}"] = f"model.layers.{layer_idx}.block_sparse_moe.{dst}"
+            # 处理线性注意力权重
+            if "self_attn" in name and not name.endswith(".bias") and layer_idx is not None:
+                if hasattr(self.config, "attn_type_list") and self.config.attn_type_list[layer_idx] == 0:
+                    filtered_weights.append((name, weight))
+                    continue
             
-            # 添加直接的权重映射规则
-            direct_mappings = {
-                "w13_weight": "experts.w13_weight",
-                "w2_weight": "experts.w2_weight",
-                "w13_weight.weight": "experts.w13_weight",
-                "w2_weight.weight": "experts.w2_weight",
-            }
-            for src, dst in direct_mappings.items():
-                orig_to_new_substr[f"model.layers.{layer_idx}.block_sparse_moe.{src}"] = f"model.layers.{layer_idx}.block_sparse_moe.{dst}"
+            # 处理共享 MLP 权重
+            if "shared_mlp" in name and not name.endswith(".bias"):
+                if not self.CONCAT_FFN:
+                    if "gate_proj" in name:
+                        new_name = name.replace("gate_proj", "w1", 1)
+                    elif "up_proj" in name:
+                        new_name = name.replace("up_proj", "w3", 1)
+                    elif "down_proj" in name:
+                        new_name = name.replace("down_proj", "w2", 1)
+                    else:
+                        new_name = name
+                else:
+                    if "gate_proj" in name:
+                        new_name = name.replace("gate_proj", "gate_up_proj", 1)
+                    elif "up_proj" in name:
+                        new_name = name.replace("up_proj", "gate_up_proj", 1)
+                    else:
+                        new_name = name
+                
+                filtered_weights.append((new_name, weight))
+                continue
             
-            # MLP 权重映射
-            if self.CONCAT_FFN:
-                mlp_mappings = {
-                    "mlp.gate_proj.weight": "mlp.gate_up_proj.weight",
-                    "mlp.up_proj.weight": "mlp.gate_up_proj.weight",
-                    "mlp.down_proj.weight": "mlp.w2.weight",
-                }
-            else:
-                mlp_mappings = {
-                    "mlp.gate_proj.weight": "mlp.w1.weight",
-                    "mlp.up_proj.weight": "mlp.w3.weight",
-                    "mlp.down_proj.weight": "mlp.w2.weight",
-                }
-            for src, dst in mlp_mappings.items():
-                orig_to_new_substr[f"model.layers.{layer_idx}.{src}"] = f"model.layers.{layer_idx}.{dst}"
+            # 处理层归一化权重
+            if "norm" in name and not name.endswith(".bias"):
+                filtered_weights.append((name, weight))
+                continue
             
-            # Attention 权重映射
-            if self.config.attn_type_list[layer_idx] == 0:  # linear attention
-                orig_to_new_substr[f"model.layers.{layer_idx}.self_attn.qkv_proj.weight"] = f"model.layers.{layer_idx}.self_attn.qkv_proj.weight"
-            else:  # flash attention
-                for proj in ["q_proj", "k_proj", "v_proj"]:
-                    orig_to_new_substr[f"model.layers.{layer_idx}.self_attn.{proj}.weight"] = f"model.layers.{layer_idx}.self_attn.qkv_proj.weight"
+            # 处理基本权重
+            if not name.endswith(".bias"):
+                filtered_weights.append((name, weight))
+                continue
             
-            # 添加 gate 权重映射
-            orig_to_new_substr[f"model.layers.{layer_idx}.block_sparse_moe.gate.weight"] = f"model.layers.{layer_idx}.block_sparse_moe.gate.weight"
+            # 处理偏置项
+            if name.endswith(".bias"):
+                filtered_weights.append((name, weight))
+                continue
+            
+            filtered_weights.append((name, weight))
         
-        mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
-        
-        # 创建需要忽略的嵌套权重前缀列表
-        ignore_prefixes = []
-        for layer_idx in range(self.config.num_hidden_layers):
-            ignore_prefixes.extend([
-                f"model.layers.{layer_idx}.block_sparse_moe.experts.w13_weight.weight",
-                f"model.layers.{layer_idx}.block_sparse_moe.experts.w2_weight.weight"
-            ])
-        
-        # 创建权重加载器
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["rotary_emb.inv_freq"],
-            ignore_unexpected_prefixes=ignore_prefixes
-        )
-        
-        # 预处理权重
-        processed_weights = []
-        for name, tensor in weights:
-            if "block_sparse_moe" in name:
-                if "w13_weight" in name:
-                    # 对于 w13_weight，沿着第二个维度分片
-                    total_size = tensor.shape[1] * tp_size
-                    shard_size = total_size // tp_size
-                    start_idx = tp_rank * shard_size
-                    end_idx = (tp_rank + 1) * shard_size
-                    tensor = tensor[:, start_idx:end_idx, :]
-                elif "w2_weight" in name:
-                    # 对于 w2_weight，沿着第二个维度分片
-                    total_size = tensor.shape[2] * tp_size
-                    shard_size = total_size // tp_size
-                    start_idx = tp_rank * shard_size
-                    end_idx = (tp_rank + 1) * shard_size
-                    tensor = tensor[:, :, start_idx:end_idx]
-            processed_weights.append((name, tensor))
-        
-        # 加载权重
-        loader.load_weights(processed_weights, mapper=mapper)
+        # 使用 AutoWeightsLoader 加载权重
+        loader = AutoWeightsLoader(self)
+        try:
+            autoloaded_weights = loader.load_weights(filtered_weights, mapper=mapper)
+            
+            # 检查缺失的参数
+            missing_params = set()
+            for name, _ in self.named_parameters():
+                if name not in autoloaded_weights:
+                    missing_params.add(name)
+            
+            if missing_params:
+                print(f"Warning: The following parameters are missing: {missing_params}")
+            
+        except Exception as e:
+            print(f"Error loading weights: {e}")
+            raise
         
         return
