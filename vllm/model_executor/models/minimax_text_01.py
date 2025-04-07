@@ -1085,12 +1085,18 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
             "model.layers.0.block_sparse_moe.experts.w1": "model.layers.0.block_sparse_moe.w13_weight",
             "model.layers.0.block_sparse_moe.experts.w2": "model.layers.0.block_sparse_moe.w2_weight",
             "model.layers.0.block_sparse_moe.experts.w3": "model.layers.0.block_sparse_moe.w13_weight",
+            # 添加嵌套权重的映射规则
+            "model.layers.0.block_sparse_moe.experts.w13_weight.weight": "model.layers.0.block_sparse_moe.experts.w13_weight",
+            "model.layers.0.block_sparse_moe.experts.w2_weight.weight": "model.layers.0.block_sparse_moe.experts.w2_weight",
         })
         
         # 添加直接的权重映射规则
         orig_to_new_substr.update({
             "model.layers.0.block_sparse_moe.w13_weight": "model.layers.0.block_sparse_moe.experts.w13_weight",
             "model.layers.0.block_sparse_moe.w2_weight": "model.layers.0.block_sparse_moe.experts.w2_weight",
+            # 添加嵌套权重的映射规则
+            "model.layers.0.block_sparse_moe.w13_weight.weight": "model.layers.0.block_sparse_moe.experts.w13_weight",
+            "model.layers.0.block_sparse_moe.w2_weight.weight": "model.layers.0.block_sparse_moe.experts.w2_weight",
         })
         
         # MLP 权重映射
