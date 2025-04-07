@@ -1178,11 +1178,9 @@ class CacheConfig:
         prefix_caching_hash_algo: str = "builtin",
         cpu_offload_gb: float = 0,
         calculate_kv_scales: Optional[bool] = None,
-        max_cache_usage: float = 0.8,  # 添加最大缓存使用率配置
-        enable_memory_optimization: bool = True,  # 添加内存优化开关
     ) -> None:
         self.block_size = block_size
-        self.gpu_memory_utilization = min(gpu_memory_utilization, 0.8)  # 限制最大显存使用率
+        self.gpu_memory_utilization = gpu_memory_utilization
         self.swap_space_bytes = swap_space * GiB_bytes
         self.num_gpu_blocks_override = num_gpu_blocks_override
         self.cache_dtype = cache_dtype
@@ -1192,8 +1190,6 @@ class CacheConfig:
         self.prefix_caching_hash_algo = prefix_caching_hash_algo
         self.cpu_offload_gb = cpu_offload_gb
         self.calculate_kv_scales = calculate_kv_scales
-        self.max_cache_usage = max_cache_usage
-        self.enable_memory_optimization = enable_memory_optimization
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()
@@ -3746,11 +3742,11 @@ class VllmConfig:
             f"seed={self.model_config.seed}, "
             f"served_model_name={self.model_config.served_model_name}, "
             f"num_scheduler_steps={self.scheduler_config.num_scheduler_steps}, "
-            f"multi_step_stream_outputs={self.scheduler_config.multi_step_stream_outputs}, " # noqa
+            f"multi_step_stream_outputs={self.scheduler_config.multi_step_stream_outputs}, "  # noqa
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
-            f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, " # noqa
+            f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
             f"use_async_output_proc={self.model_config.use_async_output_proc}, "
-            f"disable_mm_preprocessor_cache={self.model_config.disable_mm_preprocessor_cache!r},  " # noqa
+            f"disable_mm_preprocessor_cache={self.model_config.disable_mm_preprocessor_cache!r}, "  # noqa
             f"mm_processor_kwargs={self.model_config.mm_processor_kwargs}, "
             f"pooler_config={self.model_config.pooler_config!r}, "
             f"compilation_config={self.compilation_config!r}")

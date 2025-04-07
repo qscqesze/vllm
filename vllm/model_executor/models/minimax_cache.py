@@ -22,10 +22,7 @@ class MinimaxCacheManager(ConstantSizeCache):
         super().__init__(cache_shape[1])  # max_batch_size is cache_shape[1]
         self._minimax_cache = torch.empty(size=cache_shape,
                                           dtype=dtype,
-                                          device="cuda",
-                                          pin_memory=True)
-        self._cache_usage = 0
-        self._max_cache_usage = 0.8  # 最大缓存使用率
+                                          device="cuda")
 
     @property
     def cache(self):
@@ -36,12 +33,3 @@ class MinimaxCacheManager(ConstantSizeCache):
         for cache_t in self.cache:
             cache_t[:, to_index].copy_(cache_t[:, from_index],
                                        non_blocking=True)
-
-    def _clear_cache_if_needed(self):
-        if self._cache_usage > self._max_cache_usage:
-            torch.cuda.empty_cache()
-            self._cache_usage = 0
-            
-    def _update_cache_usage(self):
-        self._cache_usage = torch.cuda.memory_allocated() / torch.cuda.max_memory_allocated()
-        self._clear_cache_if_needed()
