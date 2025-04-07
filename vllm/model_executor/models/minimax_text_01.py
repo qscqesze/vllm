@@ -3,7 +3,7 @@
 import copy
 import math
 import re
-from typing import Dict, Iterable, List, Optional, Tuple, Union, Set
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed
@@ -44,7 +44,6 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import HasInnerState, IsHybrid, SupportsV0Only
 from .minimax_cache import MinimaxCacheManager, MinimaxCacheParams
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
-from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 
 
 def replace_weight_name(name: str,
@@ -837,8 +836,8 @@ class MiniMaxText01Model(nn.Module):
         self._dtype = _dummy.dtype
         del _dummy
 
-        # 延迟初始化 minimax_cache，只在需要时创建
-        self.minimax_cache = None
+        self.minimax_cache = MinimaxCacheManager(dtype=self._dtype,
+                                                 cache_shape=self.cache_shape)
 
         rope_theta = getattr(config, "rope_theta", 10000)
         head_dim = getattr(config, "head_dim",
@@ -903,14 +902,6 @@ class MiniMaxText01Model(nn.Module):
             kwargs["request_ids_to_seq_ids"] = {}
         if "finished_requests_ids" not in kwargs:
             kwargs["finished_requests_ids"] = []
-            
-        # 延迟初始化 minimax_cache
-        if self.minimax_cache is None:
-            self.minimax_cache = MinimaxCacheManager(
-                dtype=self._dtype,
-                cache_shape=self.cache_shape
-            )
-            
         (
             minimax_cache_tensors,
             state_indices_tensor,
@@ -1063,31 +1054,39 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                         device=device),
         })
 
-    # 定义权重映射器，用于将 HuggingFace 权重名称映射到 vLLM 权重名称
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={
-        "q_proj": "qkv_proj",
-        "k_proj": "qkv_proj",
-        "v_proj": "qkv_proj",
-        "gate_proj": "gate_up_proj",
-        "up_proj": "gate_up_proj",
-        "w1": "gate_up_proj",
-        "w2": "down_proj",
-        "w3": "gate_up_proj",
-    })
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
-        """使用 AutoWeightsLoader 加载权重，简化权重加载逻辑"""
-        processed_weights = []
-        for name, tensor in weights:
-            if re.match(r'.*block_sparse_moe\.experts\.\d+.*', name):
-                new_name = re.sub(r'block_sparse_moe\.experts\.\d+', 'block_sparse_moe.experts', name)
-                processed_weights.append((new_name, tensor))
-            else:
-                processed_weights.append((name, tensor))
-                
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> None:
+        from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
+        
+        mapper = WeightsMapper(
+            orig_to_new_substr={
+                "experts.0.w1.weight": "w13_weight",
+                "experts.0.w2.weight": "w2_weight",
+                "experts.0.w3.weight": "w13_weight",
+                "0.w1.weight_scale": "w13_scale",
+                "0.w2.weight_scale": "w2_scale",
+                "0.w3.weight_scale": "w13_scale",
+                "0.w1.weight": "w13_weight",
+                "0.w2.weight": "w2_weight",
+                "0.w3.weight": "w13_weight",
+            },
+            orig_to_new_substr={
+                "gate_proj": "gate_up_proj" if self.CONCAT_FFN else "w1",
+                "up_proj": "gate_up_proj" if self.CONCAT_FFN else "w3",
+                "down_proj": "w2",
+            },
+            orig_to_new_substr={
+                "q_proj": "qkv_proj",
+                "k_proj": "qkv_proj",
+                "v_proj": "qkv_proj",
+            }
+        )
+        
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=["rotary_emb.inv_freq"],
+            skip_prefixes=["rotary_emb.inv_freq"]
         )
-        return loader.load_weights(processed_weights, mapper=self.hf_to_vllm_mapper)
+        
+        # 加载权重
+        loader.load_weights(weights, mapper=mapper)
+        
+        return
