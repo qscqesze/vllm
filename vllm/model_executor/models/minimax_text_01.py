@@ -1061,6 +1061,28 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
         # 获取张量并行大小
         tp_size = get_tensor_model_parallel_world_size()
         
+        # 预处理权重
+        processed_weights = []
+        for name, tensor in weights:
+            if "block_sparse_moe" in name:
+                if "w13_weight" in name or "w2_weight" in name:
+                    # 计算分片大小
+                    if "w13_weight" in name:
+                        total_size = tensor.shape[0] * tp_size
+                        shard_size = total_size // tp_size
+                        tp_rank = get_tensor_model_parallel_rank()
+                        start_idx = tp_rank * shard_size
+                        end_idx = (tp_rank + 1) * shard_size
+                        tensor = tensor[start_idx:end_idx]
+                    elif "w2_weight" in name:
+                        total_size = tensor.shape[1] * tp_size
+                        shard_size = total_size // tp_size
+                        tp_rank = get_tensor_model_parallel_rank()
+                        start_idx = tp_rank * shard_size
+                        end_idx = (tp_rank + 1) * shard_size
+                        tensor = tensor[:, start_idx:end_idx]
+            processed_weights.append((name, tensor))
+        
         # 创建权重映射规则
         orig_to_new_substr = {}
         
@@ -1148,26 +1170,6 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
         )
         
         # 加载权重
-        loader.load_weights(weights, mapper=mapper)
-        
-        # 处理张量并行的权重分片
-        for name, param in self.named_parameters():
-            if "block_sparse_moe" in name:
-                if "w13_weight" in name:
-                    # 对于 w13_weight，沿着第一个维度分片
-                    total_size = param.shape[0] * tp_size
-                    shard_size = total_size // tp_size
-                    tp_rank = get_tensor_model_parallel_rank()
-                    start_idx = tp_rank * shard_size
-                    end_idx = (tp_rank + 1) * shard_size
-                    param.data = param.data[start_idx:end_idx]
-                elif "w2_weight" in name:
-                    # 对于 w2_weight，沿着第二个维度分片
-                    total_size = param.shape[1] * tp_size
-                    shard_size = total_size // tp_size
-                    tp_rank = get_tensor_model_parallel_rank()
-                    start_idx = tp_rank * shard_size
-                    end_idx = (tp_rank + 1) * shard_size
-                    param.data = param.data[:, start_idx:end_idx]
+        loader.load_weights(processed_weights, mapper=mapper)
         
         return
