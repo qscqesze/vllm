@@ -1140,38 +1140,28 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                 f"model.layers.{layer_idx}.block_sparse_moe.experts.w2_weight.weight"
             ])
         
-        # 创建自定义权重加载器
-        def custom_weight_loader(param, loaded_weight, prefix=None):
-            if prefix is None:
-                prefix = ""
-                
-            # 检查是否是 MoE 权重
-            if "block_sparse_moe" in prefix:
-                if "w13_weight" in prefix:
-                    # 对于 w13_weight，沿着第一个维度分片
-                    shard_size = loaded_weight.shape[0] // tp_size
-                    tp_rank = get_tensor_model_parallel_rank()
-                    param.data.copy_(loaded_weight[tp_rank * shard_size:(tp_rank + 1) * shard_size])
-                elif "w2_weight" in prefix:
-                    # 对于 w2_weight，沿着第二个维度分片
-                    shard_size = loaded_weight.shape[1] // tp_size
-                    tp_rank = get_tensor_model_parallel_rank()
-                    param.data.copy_(loaded_weight[:, tp_rank * shard_size:(tp_rank + 1) * shard_size])
-                else:
-                    # 对于其他 MoE 权重（如 gate），直接加载
-                    param.data.copy_(loaded_weight)
-            else:
-                # 对于非 MoE 权重，直接加载
-                param.data.copy_(loaded_weight)
-        
+        # 创建权重加载器
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=["rotary_emb.inv_freq"],
-            ignore_unexpected_prefixes=ignore_prefixes,
-            weight_loader=custom_weight_loader
+            ignore_unexpected_prefixes=ignore_prefixes
         )
         
         # 加载权重
         loader.load_weights(weights, mapper=mapper)
+        
+        # 处理张量并行的权重分片
+        for name, param in self.named_parameters():
+            if "block_sparse_moe" in name:
+                if "w13_weight" in name:
+                    # 对于 w13_weight，沿着第一个维度分片
+                    shard_size = param.shape[0] // tp_size
+                    tp_rank = get_tensor_model_parallel_rank()
+                    param.data = param.data[tp_rank * shard_size:(tp_rank + 1) * shard_size]
+                elif "w2_weight" in name:
+                    # 对于 w2_weight，沿着第二个维度分片
+                    shard_size = param.shape[1] // tp_size
+                    tp_rank = get_tensor_model_parallel_rank()
+                    param.data = param.data[:, tp_rank * shard_size:(tp_rank + 1) * shard_size]
         
         return
