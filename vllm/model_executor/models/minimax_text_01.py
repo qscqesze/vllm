@@ -1065,10 +1065,10 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
             for expert_id in range(max(self.config.num_local_experts)):
                 for weight_name in ["w1", "w2", "w3"]:
                     param_name = "w13_weight" if weight_name in ["w1", "w3"] else "w2_weight"
-                    orig_to_new_substr[f"model.layers.0.block_sparse_moe.experts.{expert_id}.{weight_name}.weight"] = f"model.layers.0.block_sparse_moe.{param_name}"
+                    orig_to_new_substr[f"model.layers.0.block_sparse_moe.{expert_id}.{weight_name}.weight"] = f"model.layers.0.block_sparse_moe.{param_name}"
                     # 添加 scale 映射
                     scale_name = "w13_scale" if weight_name in ["w1", "w3"] else "w2_scale"
-                    orig_to_new_substr[f"model.layers.0.block_sparse_moe.experts.{expert_id}.{weight_name}.weight_scale"] = f"model.layers.0.block_sparse_moe.{scale_name}"
+                    orig_to_new_substr[f"model.layers.0.block_sparse_moe.{expert_id}.{weight_name}.weight_scale"] = f"model.layers.0.block_sparse_moe.{scale_name}"
         else:
             for expert_id in range(self.config.num_local_experts):
                 for weight_name in ["w1", "w2", "w3"]:
