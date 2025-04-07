@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """Inference-only MiniMaxText01 model."""
-import copy
 import math
 import re
 from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
@@ -420,7 +419,12 @@ class MiniMaxText01LinearAttention(nn.Module):
 
     def _prefill_and_mix_infer(self, q, k, v, kv_cache, state_indices_tensor,
                                attn_metadata):
-        hidden = []
+        total_tokens = q.size(0)
+        hidden = torch.zeros((total_tokens, q.size(-1)),
+                             device=q.device,
+                             dtype=q.dtype)
+        current_pos = 0
+
         for _prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
             _start = attn_metadata.query_start_loc[_prefill_idx]
             _end = attn_metadata.query_start_loc[_prefill_idx + 1]
@@ -428,7 +432,6 @@ class MiniMaxText01LinearAttention(nn.Module):
             qs = q[_start:_end].transpose(0, 1).contiguous()
             ks = k[_start:_end].transpose(0, 1).contiguous()
             vs = v[_start:_end].transpose(0, 1).contiguous()
-            slot_id = state_indices_tensor[_prefill_idx]
             slice_layer_cache = kv_cache[slot_id, ...]
 
             out_slice = MiniMaxText01LinearKernel.jit_linear_forward_prefix(
@@ -439,21 +442,24 @@ class MiniMaxText01LinearAttention(nn.Module):
                 self.tp_slope,
                 self.BLOCK,
                 layer_idx=self.layer_idx)
-            hidden.append(out_slice.contiguous())
+            hidden[current_pos:_end] = out_slice
+            current_pos = _end
+
         if attn_metadata.num_decode_tokens > 0:
-            hidden.append(
-                self._decode_infer(q, k, v, kv_cache, state_indices_tensor,
-                                   attn_metadata))
-        hidden = torch.concat(hidden, dim=0).contiguous()
+            decode_hidden = self._decode_infer(q, k, v, kv_cache,
+                                               state_indices_tensor,
+                                               attn_metadata)
+            hidden[current_pos:] = decode_hidden
+
         return hidden
 
     def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor,
                       attn_metadata):
-        q = q[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
-        k = k[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
-        v = v[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
-        slot_id = state_indices_tensor[getattr(attn_metadata, "num_prefills", 0
-                                               ):]
+        num_prefill = attn_metadata.num_prefill_tokens
+        q = q[num_prefill:].view(-1, 1, 1, q.size(-1))
+        k = k[num_prefill:].view(-1, 1, 1, k.size(-1))
+        v = v[num_prefill:].view(-1, 1, 1, v.size(-1))
+        slot_id = state_indices_tensor[getattr(attn_metadata, "num_prefills", 0):]
         hidden = linear_decode_forward_triton(q, k, v, kv_cache, self.tp_slope,
                                               slot_id, 32)
         return hidden
@@ -717,24 +723,20 @@ class MiniMaxText01DecoderLayer(nn.Module):
         if self.expert_num == 1:
             hidden_states = self.mlp(layernorm_output)
         else:
-            moe_hidden_states = self.block_sparse_moe(
-                copy.deepcopy(layernorm_output))
+            moe_hidden_states = self.block_sparse_moe(layernorm_output)
             if self.shared_moe:
                 before_moe_dtype = layernorm_output.dtype
-                moe_hidden_fp32 = moe_hidden_states.to(torch.float32)
-                output_mlp = self.shared_mlp(layernorm_output).to(
-                    torch.float32)
+                moe_hidden_fp32 = moe_hidden_states.view_as(moe_hidden_states).to(torch.float32)
+                output_mlp = self.shared_mlp(layernorm_output).to(torch.float32)
 
                 coef, _ = self.coefficient(layernorm_output.to(torch.float32))
 
                 if self.shared_moe_mode == 'softmax':
                     coef = torch.nn.functional.softmax(coef, dim=-1)
-                    hidden_states = moe_hidden_fp32 * (
-                        1 - coef) + output_mlp * coef
+                    hidden_states = moe_hidden_fp32.mul_(1 - coef).add_(output_mlp.mul(coef))
                 elif self.shared_moe_mode == 'sigmoid':
                     coef = torch.nn.functional.sigmoid(coef)
-                    hidden_states = moe_hidden_fp32 * (
-                        1 - coef) + output_mlp * coef
+                    hidden_states = moe_hidden_fp32.mul_(1 - coef).add_(output_mlp.mul(coef))
 
                 hidden_states = hidden_states.to(before_moe_dtype)
             else:
@@ -882,10 +884,7 @@ class MiniMaxText01Model(nn.Module):
                 slots_to_clear.append(seq_to_slot_maps[seq_id])
 
         if slots_to_clear:
-            slots_tensor = torch.tensor(slots_to_clear,
-                                        device=minimax_cache_tensors.device,
-                                        dtype=torch.long)
-            minimax_cache_tensors[:, slots_tensor, ...] = 0
+            minimax_cache_tensors[:, slots_to_clear, ...] = 0
 
     def forward(self,
                 input_ids: Optional[torch.Tensor],
@@ -898,23 +897,29 @@ class MiniMaxText01Model(nn.Module):
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
             return None
-        if "request_ids_to_seq_ids" not in kwargs:
-            kwargs["request_ids_to_seq_ids"] = {}
-        if "finished_requests_ids" not in kwargs:
-            kwargs["finished_requests_ids"] = []
-        (
-            minimax_cache_tensors,
-            state_indices_tensor,
-        ) = self.minimax_cache.current_run_tensors(**kwargs)
+            
+        # 使用默认值避免创建新的字典
+        request_ids_to_seq_ids = kwargs.get("request_ids_to_seq_ids", {})
+        finished_requests_ids = kwargs.get("finished_requests_ids", [])
+        
+        # 获取缓存张量
+        minimax_cache_tensors, state_indices_tensor = self.minimax_cache.current_run_tensors(
+            request_ids_to_seq_ids=request_ids_to_seq_ids,
+            finished_requests_ids=finished_requests_ids
+        )
+        
+        # 清理缓存
         if getattr(attn_metadata, "num_prefills", 0) > 0:
             self._clear_prefill_cache(attn_metadata, minimax_cache_tensors,
-                                      **kwargs)
+                                    request_ids_to_seq_ids=request_ids_to_seq_ids)
 
         minimax_cache_params = MinimaxCacheParams(minimax_cache_tensors,
-                                                  state_indices_tensor)
+                                                state_indices_tensor)
+                                                
+        # 处理输入嵌入
         if get_pp_group().is_first_rank:
             if inputs_embeds is None:
-                hidden_states = self.embed_scale * self.embed_tokens(input_ids)
+                hidden_states = self.embed_tokens(input_ids).mul_(self.embed_scale)
             else:
                 hidden_states = inputs_embeds
             residual = None
@@ -923,20 +928,25 @@ class MiniMaxText01Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        # 设置旋转嵌入
+        attn_metadata.rotary_emb = self.rotary_emb
+        
+        # 处理每一层
         kv_cache_index = 0
         minimax_cache_index = 0
-        attn_metadata.rotary_emb = self.rotary_emb
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             _caches = None
+            
+            # 根据注意力类型获取缓存
             if isinstance(layer.self_attn, MiniMaxText01Attention):
                 _caches = kv_caches[kv_cache_index]
                 kv_cache_index += 1
-            if isinstance(layer.self_attn, MiniMaxText01LinearAttention):
-                current_state_layer = minimax_cache_index
-                _caches = minimax_cache_params.at_layer_idx(
-                    current_state_layer)
+            elif isinstance(layer.self_attn, MiniMaxText01LinearAttention):
+                _caches = minimax_cache_params.at_layer_idx(minimax_cache_index)
                 minimax_cache_index += 1
+                
+            # 前向传播
             hidden_states, residual = layer(
                 hidden_states=hidden_states,
                 positions=positions,
@@ -944,11 +954,15 @@ class MiniMaxText01Model(nn.Module):
                 attn_metadata=attn_metadata,
                 residual=residual,
             )
+            
+        # 处理最后一层
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
                 "residual": residual
             })
+            
+        # 应用最终的层归一化
         if residual is not None:
             hidden_states, _ = self.norm(hidden_states, residual)
         else:
@@ -998,9 +1012,9 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
         else:
             self.lm_head = PPMissingLayer()
 
-        flash_layer_count = sum(1 for attn_type in self.config.attn_type_list
-                                if attn_type == 1)
-        self.kv_cache = [torch.tensor([]) for _ in range(flash_layer_count)]
+        # flash_layer_count = sum(1 for attn_type in self.config.attn_type_list
+        #                         if attn_type == 1)
+        self.kv_cache = []
         return
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
