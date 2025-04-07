@@ -1155,13 +1155,19 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
             if "block_sparse_moe" in name:
                 if "w13_weight" in name:
                     # 对于 w13_weight，沿着第一个维度分片
-                    shard_size = param.shape[0] // tp_size
+                    total_size = param.shape[0] * tp_size
+                    shard_size = total_size // tp_size
                     tp_rank = get_tensor_model_parallel_rank()
-                    param.data = param.data[tp_rank * shard_size:(tp_rank + 1) * shard_size]
+                    start_idx = tp_rank * shard_size
+                    end_idx = (tp_rank + 1) * shard_size
+                    param.data = param.data[start_idx:end_idx]
                 elif "w2_weight" in name:
                     # 对于 w2_weight，沿着第二个维度分片
-                    shard_size = param.shape[1] // tp_size
+                    total_size = param.shape[1] * tp_size
+                    shard_size = total_size // tp_size
                     tp_rank = get_tensor_model_parallel_rank()
-                    param.data = param.data[:, tp_rank * shard_size:(tp_rank + 1) * shard_size]
+                    start_idx = tp_rank * shard_size
+                    end_idx = (tp_rank + 1) * shard_size
+                    param.data = param.data[:, start_idx:end_idx]
         
         return
