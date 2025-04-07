@@ -3,7 +3,7 @@
 import copy
 import math
 import re
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union, Set
 
 import torch
 import torch.distributed
@@ -36,7 +36,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader, AutoWeightsLoader, WeightsMapper
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
@@ -389,10 +389,6 @@ class MiniMaxText01LinearAttention(nn.Module):
                                         self.tp_heads:(self.tp_rank + 1) *
                                         self.tp_heads].contiguous()
 
-        # 添加显存优化配置
-        self.use_optimized_layout = getattr(quant_config, "use_optimized_layout", True)
-        self.use_compression = getattr(quant_config, "use_compression", True)
-
     @staticmethod
     def weight_direct_load(param: torch.Tensor,
                            loaded_weight: torch.Tensor) -> None:
@@ -464,64 +460,31 @@ class MiniMaxText01LinearAttention(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor,
                 kv_caches: MinimaxCacheParams, **kwargs) -> torch.Tensor:
-        # 优化内存布局
-        if self.use_optimized_layout:
-            hidden_states = hidden_states.contiguous()
-            if hidden_states.stride(0) % 16 != 0:
-                hidden_states = hidden_states.as_strided(
-                    hidden_states.size(),
-                    (hidden_states.stride(0) + 15) // 16 * 16,
-                    hidden_states.stride(1)
-                )
-                
-        with torch.cuda.amp.autocast(enabled=self.use_compression):
-            qkv, _ = self.qkv_proj(hidden_states)
-            qkv32 = qkv.to(torch.float32)
-            qkvact = torch.nn.functional.silu(qkv32)
-            qkvact = qkvact.view((qkv.shape[0], self.tp_heads, -1))
-            q, k, v = torch.split(qkvact, [self.head_dim] * 3, dim=-1)
-            
-            # 优化注意力计算的显存使用,保持精度
-            if self.use_compression:
-                # 使用无损压缩
-                q = self._compress_tensor(q)
-                k = self._compress_tensor(k)
-                v = self._compress_tensor(v)
-            
-            forward_context = get_forward_context()
-            attn_metadata = forward_context.attn_metadata
-            kv_cache = kv_caches.minimax_cache
-            state_indices_tensor = kv_caches.state_indices_tensor
+        qkv, _ = self.qkv_proj(hidden_states)
+        qkv32 = qkv.to(torch.float32)
+        qkvact = torch.nn.functional.silu(qkv32)
+        qkvact = qkvact.view((qkv.shape[0], self.tp_heads, -1))
+        q, k, v = torch.split(qkvact, [self.head_dim] * 3, dim=-1)
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+        kv_cache = kv_caches.minimax_cache
+        state_indices_tensor = kv_caches.state_indices_tensor
 
-            decode_only = getattr(attn_metadata, "num_prefills", 0) == 0
-            if not decode_only:
-                hidden = self._prefill_and_mix_infer(q, k, v, kv_cache,
-                                                     state_indices_tensor,
-                                                     attn_metadata)
-            else:
-                hidden = self._decode_infer(q, k, v, kv_cache,
-                                            state_indices_tensor, attn_metadata)
+        decode_only = getattr(attn_metadata, "num_prefills", 0) == 0
+        if not decode_only:
+            hidden = self._prefill_and_mix_infer(q, k, v, kv_cache,
+                                                 state_indices_tensor,
+                                                 attn_metadata)
+        else:
+            hidden = self._decode_infer(q, k, v, kv_cache,
+                                        state_indices_tensor, attn_metadata)
 
-            hidden = self.norm._forward(hidden)
-            gate, _ = self.output_gate(hidden_states)
-            hidden = F.sigmoid(gate) * hidden
-            hidden = hidden.to(hidden_states.dtype)
-            hidden, _ = self.out_proj(hidden)
-            return hidden
-
-    def _compress_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
-        """使用无损压缩优化显存使用"""
-        # 使用连续内存布局
-        if not tensor.is_contiguous():
-            tensor = tensor.contiguous()
-        # 使用优化的内存对齐
-        if tensor.stride(0) % 16 != 0:
-            tensor = tensor.as_strided(
-                tensor.size(),
-                (tensor.stride(0) + 15) // 16 * 16,
-                tensor.stride(1)
-            )
-        return tensor
+        hidden = self.norm._forward(hidden)
+        gate, _ = self.output_gate(hidden_states)
+        hidden = F.sigmoid(gate) * hidden
+        hidden = hidden.to(hidden_states.dtype)
+        hidden, _ = self.out_proj(hidden)
+        return hidden
 
 
 class MiniMaxText01Attention(nn.Module):
@@ -804,12 +767,7 @@ class MiniMaxText01Model(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        
-        # 优化 KV Cache 配置
-        if cache_config:
-            cache_config.use_compression = True  # 启用无损压缩
-            cache_config.use_optimized_layout = True  # 使用优化的内存布局
-            
+
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
@@ -929,18 +887,6 @@ class MiniMaxText01Model(nn.Module):
                                         dtype=torch.long)
             minimax_cache_tensors[:, slots_tensor, ...] = 0
 
-    def _optimize_cache_layout(self, cache: torch.Tensor) -> torch.Tensor:
-        """优化缓存的内存布局,不影响精度"""
-        # 使用连续内存布局
-        if not cache.is_contiguous():
-            cache = cache.contiguous()
-        # 使用优化的内存对齐
-        if cache.stride(0) % 16 != 0:
-            cache = cache.as_strided(cache.size(), 
-                                   (cache.stride(0) + 15) // 16 * 16,
-                                   cache.stride(1))
-        return cache
-
     def forward(self,
                 input_ids: Optional[torch.Tensor],
                 positions: torch.Tensor,
@@ -952,22 +898,14 @@ class MiniMaxText01Model(nn.Module):
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
             return None
-            
-        # 优化内存使用
         if "request_ids_to_seq_ids" not in kwargs:
             kwargs["request_ids_to_seq_ids"] = {}
         if "finished_requests_ids" not in kwargs:
             kwargs["finished_requests_ids"] = []
-            
-        # 优化 KV Cache 内存布局
-        if hasattr(self, 'cache_config') and self.cache_config.use_optimized_layout:
-            kv_caches = [self._optimize_cache_layout(cache) for cache in kv_caches]
-            
         (
             minimax_cache_tensors,
             state_indices_tensor,
         ) = self.minimax_cache.current_run_tensors(**kwargs)
-        
         if getattr(attn_metadata, "num_prefills", 0) > 0:
             self._clear_prefill_cache(attn_metadata, minimax_cache_tensors,
                                       **kwargs)
@@ -1019,11 +957,35 @@ class MiniMaxText01Model(nn.Module):
         return hidden_states
 
 
+class MiniMaxWeightsMapper(WeightsMapper):
+    """权重映射器用于处理 MiniMax 模型的权重名称转换"""
+    def __init__(self):
+        super().__init__(orig_to_new_substr={
+            "w1": "gate_up_proj",
+            "w2": "down_proj",
+            "w3": "gate_up_proj",
+            "q_proj": "qkv_proj",
+            "k_proj": "qkv_proj", 
+            "v_proj": "qkv_proj",
+            "o_proj": "o_proj",
+            "gate_proj": "gate_up_proj",
+            "up_proj": "gate_up_proj",
+            "experts": "block_sparse_moe.experts",
+            "shared_mlp": "shared_mlp",
+            "norm": "norm",
+            "input_layernorm": "input_layernorm",
+            "post_attention_layernorm": "post_attention_layernorm",
+        })
+
+
 class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                                SupportsV0Only):
+    """MiniMax 模型用于因果语言建模"""
+    
+    # 定义权重映射器
+    hf_to_vllm_mapper = MiniMaxWeightsMapper()
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
@@ -1116,220 +1078,14 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                         device=device),
         })
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> None:
-        params_dict = dict(self.named_parameters())
-
-        def which_layer(name: str) -> int:
-            if "layers" in name:
-                after_layer = name.split("layers")[-1]
-                return int(after_layer.split(".")[1])
-            return None
-
-        def is_linear_attn_layer(layer_idx: int) -> bool:
-            if layer_idx is None or not hasattr(self.config, "attn_type_list"):
-                return False
-            return self.config.attn_type_list[layer_idx] == 0
-
-        def is_moe_weight(name: str) -> bool:
-            return "block_sparse_moe" in name and not name.endswith(".bias")
-
-        def get_expert_id(param_name):
-            pattern = r'model\.layers\.\d+\.block_sparse_moe\.experts\.(\d+)\.'
-            match = re.search(pattern, param_name)
-            if match:
-                return match.group(1)
-            return None
-
-        def load_sparse_moe_weight(name: str, loaded_weight: torch.Tensor,
-                                   self) -> None:
-            if isinstance(self.config.num_local_experts, list):
-                expert_params_mapping = [
-                    ("w13_weight"
-                     if weight_name in ["w1", "w3"] else "w2_weight",
-                     f"experts.{expert_id}.{weight_name}.weight", expert_id)
-                    for expert_id in range(max(self.config.num_local_experts))
-                    for weight_name in ["w1", "w2", "w3"]
-                ]
-            else:
-                expert_params_mapping = [
-                    ("w13_scale" if weight_name in ["w1", "w3"] else
-                     "w2_scale", f"{expert_id}.{weight_name}.weight_scale",
-                     expert_id, weight_name)
-                    for expert_id in range(self.config.num_local_experts)
-                    for weight_name in ["w1", "w2", "w3"]
-                ] + [("w13_weight" if weight_name in ["w1", "w3"] else
-                      "w2_weight", f"{expert_id}.{weight_name}.weight",
-                      expert_id, weight_name)
-                     for expert_id in range(self.config.num_local_experts)
-                     for weight_name in ["w1", "w2", "w3"]]
-            for (param_name, weight_name, expert_id,
-                 shard_id) in expert_params_mapping:
-                name_expert_id = get_expert_id(name)
-                if name_expert_id is not None and int(name_expert_id) != int(
-                        expert_id):
-                    continue
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                if is_pp_missing_parameter(name, self):
-                    return
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader = weight_loader_with_alias(name)(weight_loader)
-                weight_loader(param,
-                              loaded_weight,
-                              weight_name,
-                              expert_id=expert_id,
-                              shard_id=shard_id)
-                break
-            else:
-                if is_pp_missing_parameter(name, self):
-                    return
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader = weight_loader_with_alias(name)(weight_loader)
-                weight_loader(param, loaded_weight)
-            return
-
-        def is_shared_mlp_weight(name: str) -> bool:
-            return "shared_mlp" in name and not name.endswith(".bias")
-
-        def load_shared_mlp_weight(name: str, loaded_weight: torch.Tensor,
-                                   self) -> None:
-            if not self.CONCAT_FFN:
-                if "gate_proj" in name:
-                    name = name.replace("gate_proj", "w1", 1)
-                elif "up_proj" in name:
-                    name = name.replace("up_proj", "w3", 1)
-                elif "down_proj" in name:
-                    name = name.replace("down_proj", "w2", 1)
-            else:
-                if "gate_proj" in name:
-                    name = name.replace("gate_proj", "gate_up_proj", 1)
-                    loaded_shard_id = 0
-                elif "up_proj" in name:
-                    name = name.replace("up_proj", "gate_up_proj", 1)
-                    loaded_shard_id = 1
-            if is_pp_missing_parameter(name, self):
-                return
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader = weight_loader_with_alias(name)(weight_loader)
-            if not self.CONCAT_FFN:
-                weight_loader(param, loaded_weight)
-            else:
-                if "gate_up_proj" in name:
-                    weight_loader(param, loaded_weight, loaded_shard_id)
-                elif "down_proj" in name:
-                    weight_loader(param, loaded_weight)
-                else:
-                    raise AssertionError(
-                        "MLP weight not in [gate_up_proj, down_proj]")
-            return
-
-        def is_mha_weight(name: str) -> bool:
-            return "self_attn" in name and not name.endswith(".bias")
-
-        def load_linear_attn_weight(name: str, loaded_weight: torch.Tensor,
-                                    self) -> None:
-            if is_pp_missing_parameter(name, self):
-                return
-            param = params_dict[name]
-
-            weight_loader = getattr(
-                param, "weight_loader",
-                MiniMaxText01LinearAttention.weight_direct_load)
-            weight_loader = weight_loader_with_alias(name)(weight_loader)
-            weight_loader(param, loaded_weight)
-            return
-
-        def load_flash_attn_weight(name: str, loaded_weight: torch.Tensor,
-                                   self) -> None:
-
-            flash_mha_params_mapping = [
-                ("qkv_proj", "q_proj", "q"),
-                ("qkv_proj", "k_proj", "k"),
-                ("qkv_proj", "v_proj", "v"),
-                ("gate_up_proj", "gate_proj", 0),
-                ("gate_up_proj", "up_proj", 1),
-            ]
-            for (param_name, weight_name,
-                 shard_id) in flash_mha_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                if is_pp_missing_parameter(name, self):
-                    return
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader = weight_loader_with_alias(name)(weight_loader)
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                if is_pp_missing_parameter(name, self):
-                    return
-                param = params_dict[name]
-
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader = weight_loader_with_alias(name)(weight_loader)
-                weight_loader(param, loaded_weight)
-            return
-
-        def is_layer_norm_weight(name: str) -> bool:
-            return "norm" in name and not name.endswith(
-                ".bias") and name in params_dict
-
-        def load_layer_norm_weight(name: str, loaded_weight: torch.Tensor,
-                                   self) -> None:
-            if is_pp_missing_parameter(name, self):
-                return
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader = weight_loader_with_alias(name)(weight_loader)
-            weight_loader(param, loaded_weight)
-            return
-
-        def load_basic_weight(name: str, loaded_weight: torch.Tensor,
-                              self) -> None:
-            if is_pp_missing_parameter(name, self):
-                return
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader = weight_loader_with_alias(name)(weight_loader)
-            weight_loader(param, loaded_weight)
-            return
-
-        for name, loaded_weight in weights:
-            weight_at_layer = which_layer(name)
-            if weight_at_layer and weight_at_layer >= len(
-                    self.config.attn_type_list):
-                continue
-
-            if is_layer_norm_weight(name):
-                load_layer_norm_weight(name, loaded_weight, self)
-                continue
-            if is_mha_weight(name):
-                if is_linear_attn_layer(weight_at_layer):
-                    load_linear_attn_weight(name, loaded_weight, self)
-                else:
-                    load_flash_attn_weight(name, loaded_weight, self)
-                continue
-            if is_moe_weight(name):
-                load_sparse_moe_weight(name, loaded_weight, self)
-                continue
-            if is_shared_mlp_weight(name):
-                load_shared_mlp_weight(name, loaded_weight, self)
-                continue
-
-            if "rotary_emb.inv_freq" in name:
-                continue
-
-            load_basic_weight(name, loaded_weight, self)
-        return
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
+        """使用 AutoWeightsLoader 加载模型权重
+        
+        Args:
+            weights: 权重名称和对应的张量
+            
+        Returns:
+            已加载的权重名称集合
+        """
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
