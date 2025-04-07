@@ -1058,28 +1058,50 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
         from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
         
         # 创建权重映射规则
-        orig_to_new_substr = {
-            # MoE 权重映射
-            "model.layers.0.block_sparse_moe.experts.0.w1.weight": "model.layers.0.block_sparse_moe.w13_weight",  # gate_up_proj
-            "model.layers.0.block_sparse_moe.experts.0.w2.weight": "model.layers.0.block_sparse_moe.w2_weight",   # down_proj
-            "model.layers.0.block_sparse_moe.experts.0.w3.weight": "model.layers.0.block_sparse_moe.w13_weight",  # up_proj
-            "model.layers.0.block_sparse_moe.0.w1.weight_scale": "model.layers.0.block_sparse_moe.w13_scale",
-            "model.layers.0.block_sparse_moe.0.w2.weight_scale": "model.layers.0.block_sparse_moe.w2_scale",
-            "model.layers.0.block_sparse_moe.0.w3.weight_scale": "model.layers.0.block_sparse_moe.w13_scale",
-            "model.layers.0.block_sparse_moe.0.w1.weight": "model.layers.0.block_sparse_moe.w13_weight",
-            "model.layers.0.block_sparse_moe.0.w2.weight": "model.layers.0.block_sparse_moe.w2_weight",
-            "model.layers.0.block_sparse_moe.0.w3.weight": "model.layers.0.block_sparse_moe.w13_weight",
-            
-            # MLP 权重映射
-            "model.layers.0.mlp.gate_proj.weight": "model.layers.0.mlp.gate_up_proj.weight" if self.CONCAT_FFN else "model.layers.0.mlp.w1.weight",
-            "model.layers.0.mlp.up_proj.weight": "model.layers.0.mlp.gate_up_proj.weight" if self.CONCAT_FFN else "model.layers.0.mlp.w3.weight",
-            "model.layers.0.mlp.down_proj.weight": "model.layers.0.mlp.w2.weight",
-            
-            # Attention 权重映射
-            "model.layers.0.self_attn.q_proj.weight": "model.layers.0.self_attn.qkv_proj.weight",
-            "model.layers.0.self_attn.k_proj.weight": "model.layers.0.self_attn.qkv_proj.weight",
-            "model.layers.0.self_attn.v_proj.weight": "model.layers.0.self_attn.qkv_proj.weight",
-        }
+        orig_to_new_substr = {}
+        
+        # MoE 权重映射
+        if isinstance(self.config.num_local_experts, list):
+            for expert_id in range(max(self.config.num_local_experts)):
+                for weight_name in ["w1", "w2", "w3"]:
+                    param_name = "w13_weight" if weight_name in ["w1", "w3"] else "w2_weight"
+                    orig_to_new_substr[f"model.layers.0.block_sparse_moe.experts.{expert_id}.{weight_name}.weight"] = f"model.layers.0.block_sparse_moe.{param_name}"
+        else:
+            for expert_id in range(self.config.num_local_experts):
+                for weight_name in ["w1", "w2", "w3"]:
+                    # weight_scale 映射
+                    scale_name = "w13_scale" if weight_name in ["w1", "w3"] else "w2_scale"
+                    orig_to_new_substr[f"model.layers.0.block_sparse_moe.{expert_id}.{weight_name}.weight_scale"] = f"model.layers.0.block_sparse_moe.{scale_name}"
+                    # weight 映射
+                    param_name = "w13_weight" if weight_name in ["w1", "w3"] else "w2_weight"
+                    orig_to_new_substr[f"model.layers.0.block_sparse_moe.{expert_id}.{weight_name}.weight"] = f"model.layers.0.block_sparse_moe.{param_name}"
+        
+        # MLP 权重映射
+        if self.CONCAT_FFN:
+            orig_to_new_substr.update({
+                "model.layers.0.mlp.gate_proj.weight": "model.layers.0.mlp.gate_up_proj.weight",
+                "model.layers.0.mlp.up_proj.weight": "model.layers.0.mlp.gate_up_proj.weight",
+                "model.layers.0.mlp.down_proj.weight": "model.layers.0.mlp.w2.weight",
+            })
+        else:
+            orig_to_new_substr.update({
+                "model.layers.0.mlp.gate_proj.weight": "model.layers.0.mlp.w1.weight",
+                "model.layers.0.mlp.up_proj.weight": "model.layers.0.mlp.w3.weight",
+                "model.layers.0.mlp.down_proj.weight": "model.layers.0.mlp.w2.weight",
+            })
+        
+        # Attention 权重映射
+        if self.config.attn_type_list[0] == 0:  # linear attention
+            orig_to_new_substr.update({
+                "model.layers.0.self_attn.qkv_proj.weight": "model.layers.0.self_attn.qkv_proj.weight",
+            })
+        else:  # flash attention
+            orig_to_new_substr.update({
+                "model.layers.0.self_attn.q_proj.weight": "model.layers.0.self_attn.qkv_proj.weight",
+                "model.layers.0.self_attn.k_proj.weight": "model.layers.0.self_attn.qkv_proj.weight",
+                "model.layers.0.self_attn.v_proj.weight": "model.layers.0.self_attn.qkv_proj.weight",
+            })
+        
         mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
         
         loader = AutoWeightsLoader(
