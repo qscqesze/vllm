@@ -1059,6 +1059,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
         
         mapper = WeightsMapper(
             orig_to_new_substr={
+                # MoE 权重映射
                 "experts.0.w1.weight": "w13_weight",
                 "experts.0.w2.weight": "w2_weight",
                 "experts.0.w3.weight": "w13_weight",
@@ -1068,13 +1069,13 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                 "0.w1.weight": "w13_weight",
                 "0.w2.weight": "w2_weight",
                 "0.w3.weight": "w13_weight",
-            },
-            orig_to_new_substr={
+                
+                # MLP 权重映射
                 "gate_proj": "gate_up_proj" if self.CONCAT_FFN else "w1",
                 "up_proj": "gate_up_proj" if self.CONCAT_FFN else "w3",
                 "down_proj": "w2",
-            },
-            orig_to_new_substr={
+                
+                # 注意力权重映射
                 "q_proj": "qkv_proj",
                 "k_proj": "qkv_proj",
                 "v_proj": "qkv_proj",
