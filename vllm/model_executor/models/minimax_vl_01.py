@@ -454,7 +454,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.multimodal_config = multimodal_config
 
-        vision_feature_layer = self.vision_feature_layer
+        vision_feature_layer = self.config.vision_feature_layer
         if isinstance(vision_feature_layer, int):
             vision_hidden_size = config.vision_config.hidden_size
             self.feature_sample_layers = None
