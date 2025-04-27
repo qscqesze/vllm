@@ -24,7 +24,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
-                                   ImageSize, MultiModalDataItems)
+                                   MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
@@ -167,6 +167,7 @@ class MiniMaxVL01LikeConfig(Protocol):
     image_token_index: Final[int]
     vision_feature_select_strategy: Final[str]
     vision_feature_layer: Final[Union[int, list[int]]]
+    image_grid_pinpoints: Final[list[list[int]]]
 
 
 class MiniMaxVL01LikeProcessor(Protocol):
@@ -190,34 +191,12 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         mm_counts: Mapping[str, int],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
-        
-        # 获取模型配置以访问grid_pinpoints
-        hf_config = self.info.get_hf_config()
-        
-        # 如果配置中有grid_pinpoints，使用它来计算图像占位符
-        if hasattr(hf_config, 'image_grid_pinpoints') and hf_config.image_grid_pinpoints:
-            # 计算图像尺寸，确保与grid_pinpoints匹配
-            # 使用视觉编码器信息获取patch_size
-            vision_encoder_info = self.info.get_vision_encoder_info()
-            patch_size = vision_encoder_info.get_patch_size()
-            
-            # 选择最佳分辨率 (可能是grid_pinpoints中的第一个或其他适合的)
-            if hf_config.image_grid_pinpoints and len(hf_config.image_grid_pinpoints) > 0:
-                width, height = hf_config.image_grid_pinpoints[0]
-                
-                return {
-                    "image":
-                    self._get_dummy_images(width=width,
-                                          height=height,
-                                          num_images=num_images)
-                }
-        
-        # 默认使用MaxImageTokenMeta中的尺寸
+
         return {
             "image":
             self._get_dummy_images(width=MaxImageTokenMeta.width,
-                                  height=MaxImageTokenMeta.height,
-                                  num_images=num_images)
+                                   height=MaxImageTokenMeta.height,
+                                   num_images=num_images)
         }
 
 
@@ -228,9 +207,6 @@ class MiniMaxVL01ProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
-
-    def get_vision_encoder_info(self):
-        return get_vision_encoder_info(self.get_hf_config())
 
     def _apply_feature_select_strategy(
         self,
@@ -245,6 +221,9 @@ class MiniMaxVL01ProcessingInfo(BaseProcessingInfo):
         msg = f"Unexpected feature select strategy: {strategy!r}"
         raise NotImplementedError(msg)
 
+    def get_vision_encoder_info(self):
+        return get_vision_encoder_info(self.get_hf_config())
+
     def get_num_image_tokens(
         self,
         *,
@@ -253,67 +232,62 @@ class MiniMaxVL01ProcessingInfo(BaseProcessingInfo):
     ) -> int:
         hf_config = self.get_hf_config()
         vision_encoder_info = self.get_vision_encoder_info()
-        patch_size = vision_encoder_info.get_patch_size()
-        
-        # 如果配置中包含image_grid_pinpoints，使用它计算token数量
-        if hasattr(hf_config, 'image_grid_pinpoints') and hf_config.image_grid_pinpoints:
-            # 使用image_size_to_num_patches函数计算所需的token数量
-            num_patches = image_size_to_num_patches(
-                [image_height, image_width], 
-                hf_config.image_grid_pinpoints, 
-                patch_size
-            )
-            # 应用feature_select_strategy
-            return self._apply_feature_select_strategy(
-                hf_config.vision_feature_select_strategy,
-                num_patches
-            )
-            
-        # 如果没有image_grid_pinpoints，使用默认方法
-        return vision_encoder_info.get_num_image_tokens(
-            image_width=image_width,
-            image_height=image_height,
+
+        base_feature_size = self._apply_feature_select_strategy(
+            hf_config.vision_feature_select_strategy,
+            vision_encoder_info.get_num_image_tokens(
+                image_width=image_width,
+                image_height=image_height,
+            ),
         )
 
-    def get_image_size_with_most_features(self) -> ImageSize:
-        vision_encoder_info = self.get_vision_encoder_info()
-        width = height = vision_encoder_info.get_image_size()
-        return ImageSize(width=width, height=height)
-
-    def get_max_image_tokens(self) -> int:
-        hf_config = self.get_hf_config()
-        
-        # 如果有image_grid_pinpoints配置
-        if hasattr(hf_config, 'image_grid_pinpoints') and hf_config.image_grid_pinpoints:
-            # 找出grid_pinpoints中可能产生最多tokens的分辨率
-            vision_encoder_info = self.get_vision_encoder_info()
-            patch_size = vision_encoder_info.get_patch_size()
-            
-            max_tokens = 0
-            for resolution in hf_config.image_grid_pinpoints:
-                width, height = resolution
-                # 计算该分辨率下的token数量
-                num_patches = image_size_to_num_patches(
-                    [height, width], 
-                    hf_config.image_grid_pinpoints,
-                    patch_size
-                )
-                # 应用feature select策略
-                num_tokens = self._apply_feature_select_strategy(
-                    hf_config.vision_feature_select_strategy,
-                    num_patches
-                )
-                max_tokens = max(max_tokens, num_tokens)
-                
-            return max_tokens
-            
-        # 如果没有特殊配置，使用原有逻辑
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
+        num_patch_height, num_patch_width = get_anyres_image_grid_shape(
+            image_size=(image_height, image_width),
+            grid_pinpoints=hf_config.image_grid_pinpoints,
+            patch_size=vision_encoder_info.get_image_size(),
         )
+
+        (
+            unpadded_feature_size,
+            newline_feature_size,
+        ) = self._get_num_unpadded_features(
+            original_height=image_height,
+            original_width=image_width,
+            npatches=vision_encoder_info.get_patch_grid_length(),
+            num_patch_height=num_patch_height,
+            num_patch_width=num_patch_width,
+        )
+
+        return unpadded_feature_size + newline_feature_size + base_feature_size
+
+    def _get_num_unpadded_features(
+        self,
+        *,
+        original_height: int,
+        original_width: int,
+        npatches: int,
+        num_patch_height: int,
+        num_patch_width: int,
+    ) -> tuple[int, int]:
+        current_height = npatches * num_patch_height
+        current_width = npatches * num_patch_width
+
+        aspect_ratio = original_width / original_height
+        current_aspect_ratio = current_width / current_height
+
+        if aspect_ratio > current_aspect_ratio:
+            new_height = (original_height * current_width) // original_width
+            padding = (current_height - new_height) // 2
+            current_height = current_height - (2 * padding)
+        else:
+            new_width = (original_width * current_height) // original_height
+            padding = (current_width - new_width) // 2
+            current_width = current_width - (2 * padding)
+
+        unpadded_features = current_height * current_width
+        newline_features = current_height
+
+        return (unpadded_features, newline_features)
 
 
 class BaseMiniMaxVL01MultiModalProcessor(BaseMultiModalProcessor[_I]):
