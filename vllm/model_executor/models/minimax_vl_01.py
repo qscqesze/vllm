@@ -36,8 +36,8 @@ from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .pixtral import PixtralHFVisionModel
 from .siglip import SiglipVisionModel
-from .utils import (AutoWeightsLoader, embed_multimodal, flatten_bn,
-                    init_vllm_registered_model, maybe_prefix)
+from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
+                    maybe_prefix, merge_multimodal_embeddings)
 from .vision import get_vision_encoder_info
 
 logger = init_logger(__name__)
@@ -799,11 +799,13 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         if multimodal_embeddings is None:
             return self.language_model.get_input_embeddings(input_ids)
 
-        inputs_embeds = embed_multimodal(
+        inputs_embeds = self.language_model.model.get_input_embeddings(
+            input_ids)
+        inputs_embeds = merge_multimodal_embeddings(
             input_ids,
-            self.config.image_token_index,
-            self.language_model.model.get_input_embeddings,
+            inputs_embeds,
             multimodal_embeddings,
+            self.config.image_token_index,
         )
         return inputs_embeds
 
