@@ -36,7 +36,7 @@ from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .pixtral import PixtralHFVisionModel
 from .siglip import SiglipVisionModel
-from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
+from .utils import (AutoWeightsLoader, _flatten_embeddings, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 from .vision import get_vision_encoder_info
 
@@ -801,6 +801,20 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         inputs_embeds = self.language_model.model.get_input_embeddings(
             input_ids)
+        
+        is_multimodal = input_ids == self.config.image_token_index
+        num_placeholders = is_multimodal.sum().item()
+        
+        if multimodal_embeddings is not None:
+            flattened = _flatten_embeddings(multimodal_embeddings)
+            if flattened.shape[0] != num_placeholders:
+                if flattened.shape[0] > num_placeholders:
+                    multimodal_embeddings = flattened[:num_placeholders]
+                else:
+                    padding = torch.repeat_interleave(
+                        flattened[-1:], num_placeholders - flattened.shape[0], dim=0)
+                    multimodal_embeddings = torch.cat([flattened, padding], dim=0)
+        
         inputs_embeds = merge_multimodal_embeddings(
             input_ids,
             inputs_embeds,
