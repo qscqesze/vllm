@@ -370,6 +370,7 @@ class MiniMaxVL01MultiModalProcessor(
         return {
             "pixel_values": MultiModalFieldConfig.batched("image"),
             "image_embeds": MultiModalFieldConfig.batched("image"),
+            "image_sizes": MultiModalFieldConfig.batched("image"),
         }
 
 
