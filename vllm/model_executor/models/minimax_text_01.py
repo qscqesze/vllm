@@ -431,10 +431,6 @@ class MiniMaxText01LinearAttention(nn.Module):
                                attn_metadata):
         hidden = []
         for _prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
-            if _prefill_idx >= len(attn_metadata.query_start_loc):
-                break
-            if _prefill_idx >= len(state_indices_tensor):
-                break
             _start = attn_metadata.query_start_loc[_prefill_idx]
             _end = attn_metadata.query_start_loc[_prefill_idx + 1]
             slot_id = state_indices_tensor[_prefill_idx]
@@ -457,10 +453,6 @@ class MiniMaxText01LinearAttention(nn.Module):
             hidden.append(
                 self._decode_infer(q, k, v, kv_cache, state_indices_tensor,
                                    attn_metadata))
-
-        if not hidden:
-            return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
-
         hidden = torch.concat(hidden, dim=0).contiguous()
         return hidden
 
@@ -502,7 +494,6 @@ class MiniMaxText01LinearAttention(nn.Module):
         hidden = hidden.to(hidden_states.dtype)
         hidden, _ = self.out_proj(hidden)
         return hidden
-
 
 class MiniMaxText01Attention(nn.Module):
 
