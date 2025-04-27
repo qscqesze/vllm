@@ -37,7 +37,7 @@ from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .pixtral import PixtralHFVisionModel
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    maybe_prefix, merge_multimodal_embeddings)
+                    maybe_prefix)
 from .vision import get_vision_encoder_info
 
 logger = init_logger(__name__)
@@ -179,7 +179,7 @@ _I = TypeVar("_I", bound=BaseProcessingInfo)
 class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        num_images = mm_counts.get("images", 0)
+        num_images = mm_counts.get("image", 0)
         processor = self.info.get_hf_processor()
         image_token = processor.image_token
         return image_token * num_images
@@ -189,7 +189,7 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("images", 0)
+        num_images = mm_counts.get("image", 0)
 
         return {
             "image":
@@ -444,42 +444,37 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             self.language_model.make_empty_intermediate_tensors)
 
     def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
-            if isinstance(multimodal_embeddings, torch.Tensor):
-                flattened_size = multimodal_embeddings.shape[0]
-            else:
-                flattened_size = sum(embed.shape[0]
-                                     for embed in multimodal_embeddings)
+            self,
+            input_ids: torch.Tensor,
+            multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+            **kwargs: object) -> torch.Tensor:
+        image_sizes = kwargs.pop("image_sizes", None)
+        if image_sizes is not None:
+            if image_sizes is not None:
+                image_num_patches = [
+                    image_size_to_num_patches(
+                        image_size=imsize,
+                        grid_pinpoints=self.config.image_grid_pinpoints,
+                        patch_size=self.config.vision_config.image_size,
+                    ) for imsize in image_sizes
+                ]
+            image_features = torch.split(multimodal_embeddings,
+                                         image_num_patches,
+                                         dim=0)
 
-            if isinstance(self.config.image_token_index, int):
-                placeholders = (
-                    input_ids == self.config.image_token_index).sum().item()
-            else:
-                placeholders = torch.isin(
-                    input_ids,
-                    torch.tensor(self.config.image_token_index,
-                                 device=input_ids.device)).sum().item()
-
-            if placeholders > flattened_size and placeholders > 0:
-                is_placeholder = (input_ids == self.config.image_token_index)
-                keep_indices = torch.where(is_placeholder)[0][:flattened_size]
-                new_mask = torch.zeros_like(is_placeholder)
-                new_mask[keep_indices] = True
-                input_ids = input_ids.clone()
-                if self.pad_token_id >= 0:
-                    input_ids[is_placeholder & ~new_mask] = self.pad_token_id
-
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                self.config.image_token_index,
+            image_features, _ = self.pack_image_features(
+                image_features,
+                image_sizes,
+                image_newline=self.image_newline,
             )
+        inputs_embeds = input_ids.to(image_features.dtype)
+        special_image_mask = ((input_ids == self.config.image_token_index
+                               ).unsqueeze(-1).expand_as(inputs_embeds).to(
+                                   inputs_embeds.device))
+        image_features = image_features.to(inputs_embeds.device,
+                                           inputs_embeds.dtype)
+        inputs_embeds = inputs_embeds.masked_scatter(special_image_mask,
+                                                     image_features)
         return inputs_embeds
 
     def _select_image_features(self, image_features: torch.Tensor, *,
@@ -529,16 +524,31 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             return image_input["data"]
 
         assert self.vision_tower is not None
-        image_features = self._process_image_pixels(image_input)
+        pixel_values = image_input["pixel_values"]
+        image_features = self.vision_tower(pixel_values,
+                                           output_hidden_states=True)
+        selected_image_feature = image_features.hidden_states[
+            self.vision_feature_layer]
 
-        if isinstance(image_features, torch.Tensor):
-            return self.multi_modal_projector(image_features)
+        selected_image_feature = torch.chunk(selected_image_feature,
+                                             len(pixel_values),
+                                             dim=1)
+        selected_image_feature = torch.cat(selected_image_feature, dim=0)
+
+        if self.config.vision_feature_select_strategy == "default":
+            selected_image_feature = selected_image_feature[:, 1:]
+        elif self.config.vision_feature_select_strategy == "full":
+            selected_image_feature = selected_image_feature
+
+        if isinstance(selected_image_feature, torch.Tensor):
+            return self.multi_modal_projector(selected_image_feature)
 
         feature_sizes = [
-            image_feature.shape[0] for image_feature in image_features
+            image_feature.shape[0] for image_feature in selected_image_feature
         ]
 
-        image_embeds = self.multi_modal_projector(torch.cat(image_features))
+        image_embeds = self.multi_modal_projector(
+            torch.cat(selected_image_feature))
         image_embeds = torch.split(image_embeds, feature_sizes)
         return image_embeds
 
@@ -608,7 +618,8 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
             inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+                                                      vision_embeddings,
+                                                      **kwargs)
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
