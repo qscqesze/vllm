@@ -556,16 +556,24 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         expected_dims = (3, h, w)
 
         def _validate_shape(d: torch.Tensor):
-            actual_dims = tuple(d.shape[1:])
-
-            if actual_dims != expected_dims:
-                expected_expr = ("num_patches", *map(str, expected_dims))
+            if d.ndim == 3:
+                if d.shape[0] == 3 and d.shape[1] == h and d.shape[2] == w:
+                    return True
+            elif d.ndim == 4:
+                if d.shape[1:] == expected_dims:
+                    return True
+            elif d.ndim == 5:
+                if d.shape[2:] == expected_dims:
+                    return True
+            else:
                 raise ValueError(
-                    "The expected shape of pixel values per image per batch "
-                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
+                    f"Failed to validate shape: {d.ndim}, {d.shape}")
 
-        for d in data:
-            _validate_shape(d)
+        if isinstance(data, torch.Tensor):
+            _validate_shape(data)
+        else:
+            for d in data:
+                _validate_shape(d)
 
         return data
 
@@ -711,8 +719,17 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         pixel_values = inputs["pixel_values"]
 
         if isinstance(pixel_values, torch.Tensor):
-            b, num_patches, c, h, w = pixel_values.shape
-            stacked_pixel_values = pixel_values.view(b * num_patches, c, h, w)
+            if pixel_values.ndim == 3:
+                pixel_values = pixel_values.unsqueeze(0).unsqueeze(0)
+                b, num_patches, c, h, w = pixel_values.shape
+            elif pixel_values.ndim == 4:
+                pixel_values = pixel_values.unsqueeze(0)
+                b, num_patches, c, h, w = pixel_values.shape
+            else:
+                b, num_patches, c, h, w = pixel_values.shape
+
+            stacked_pixel_values = pixel_values.reshape(
+                b * num_patches, c, h, w)
             stacked_image_features = self._image_pixels_to_features(
                 self.vision_tower, stacked_pixel_values)
             stacked_patch_embeddings = self.multi_modal_projector(
@@ -721,8 +738,17 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             return stacked_patch_embeddings.view(
                 b, num_patches, *stacked_patch_embeddings.shape[1:])
 
-        num_patches_per_batch = [v.shape[0] for v in pixel_values]
-        stacked_pixel_values = torch.cat(pixel_values)
+        # 处理列表形式的输入
+        num_patches_per_batch = []
+        processed_values = []
+
+        for v in pixel_values:
+            if v.ndim == 3:
+                v = v.unsqueeze(0)
+            num_patches_per_batch.append(v.shape[0])
+            processed_values.append(v)
+
+        stacked_pixel_values = torch.cat(processed_values)
         stacked_image_features = self._image_pixels_to_features(
             self.vision_tower, stacked_pixel_values)
 
