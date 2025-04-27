@@ -46,8 +46,8 @@ logger = init_logger(__name__)
 # For dummy input only
 @dataclass
 class MaxImageTokenMeta:
-    width: int = 1024
-    height: int = 1024
+    width: int = 336
+    height: int = 336
 
 
 class MiniMaxVL01ImagePixelInputs(TypedDict):
@@ -230,14 +230,25 @@ class MiniMaxVL01ProcessingInfo(BaseProcessingInfo):
         image_height: int,
     ) -> int:
         hf_config = self.get_hf_config()
-        vision_encoder_info = self.get_vision_encoder_info()
+        vision_config = hf_config.vision_config
+
+        image_size = vision_config.image_size
+        patch_size = vision_config.patch_size
+
+        if image_width != image_size or image_height != image_size:
+            best_resolution = select_best_resolution(
+                [image_height, image_width], hf_config.image_grid_pinpoints)
+            height, width = best_resolution
+        else:
+            height, width = image_size, image_size
+
+        num_patches_height = height // patch_size
+        num_patches_width = width // patch_size
+        num_patches = num_patches_height * num_patches_width
 
         return self._apply_feature_select_strategy(
             hf_config.vision_feature_select_strategy,
-            vision_encoder_info.get_num_image_tokens(
-                image_width=image_width,
-                image_height=image_height,
-            ),
+            num_patches + 1,
         )
 
     def get_image_size_with_most_features(self) -> ImageSize:
