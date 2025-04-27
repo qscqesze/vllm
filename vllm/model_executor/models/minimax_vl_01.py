@@ -69,6 +69,69 @@ class MiniMaxVL01ImageEmbeddingInputs(TypedDict):
     `hidden_size` must match the hidden size of language model backbone.
     """
 
+
+def image_size_to_num_patches(image_size, grid_pinpoints, patch_size: int):
+    if not isinstance(grid_pinpoints, list):
+        raise TypeError("grid_pinpoints should be a list of tuples or lists")
+
+    # ! VERY IMPORTANT if image_size is tensor, must convert to into tuple,
+    # otherwise it will cause wrong calculate
+    if not isinstance(image_size, (list, tuple)):
+        if not isinstance(image_size, (torch.Tensor, np.ndarray)):
+            raise TypeError("image_size invalid type " +
+                            f"{type(image_size)} with value {image_size}")
+        image_size = image_size.tolist()
+
+    best_resolution = select_best_resolution(image_size, grid_pinpoints)
+    height, width = best_resolution
+    num_patches = 0
+    # consider change to ceil(height/patch_size)*ceil(width/patch_size) + 1
+    for i in range(0, height, patch_size):
+        for j in range(0, width, patch_size):
+            num_patches += 1
+    # add the base patch
+    num_patches += 1
+    return num_patches
+
+
+def get_anyres_image_grid_shape(image_size, grid_pinpoints, patch_size):
+    if not isinstance(grid_pinpoints, list):
+        raise TypeError("grid_pinpoints should be a list of tuples or lists")
+
+    # ! VERY IMPORTANT if image_size is tensor,
+    # must convert to into tuple,
+    # otherwise it will cause wrong calculate
+    if not isinstance(image_size, (list, tuple)):
+        if not isinstance(image_size, (torch.Tensor, np.ndarray)):
+            raise TypeError(
+                "image_size invalid type " +
+                f"{type(image_size)} not valid, " +
+                "should be either list, tuple, np.ndarray or tensor")
+        image_size = image_size.tolist()
+
+    height, width = select_best_resolution(image_size, grid_pinpoints)
+    return height // patch_size, width // patch_size
+
+
+def unpad_image(tensor, original_size):
+    original_height, original_width = original_size
+    current_height, current_width = tensor.shape[1:]
+
+    original_aspect_ratio = original_width / original_height
+    current_aspect_ratio = current_width / current_height
+
+    if original_aspect_ratio > current_aspect_ratio:
+        new_height = int(original_height * current_width) // original_width
+        padding = (current_height - new_height) // 2
+        unpadded_tensor = tensor[:, padding:current_height - padding, :]
+    else:
+        new_width = int(original_width * current_height) // original_height
+        padding = (current_width - new_width) // 2
+        unpadded_tensor = tensor[:, :, padding:current_width - padding]
+
+    return unpadded_tensor
+
+
 class MiniMaxVL01MultiModalProjector(nn.Module):
 
     def __init__(self,
@@ -127,12 +190,34 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         mm_counts: Mapping[str, int],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
-
+        
+        # 获取模型配置以访问grid_pinpoints
+        hf_config = self.info.get_hf_config()
+        
+        # 如果配置中有grid_pinpoints，使用它来计算图像占位符
+        if hasattr(hf_config, 'image_grid_pinpoints') and hf_config.image_grid_pinpoints:
+            # 计算图像尺寸，确保与grid_pinpoints匹配
+            # 使用视觉编码器信息获取patch_size
+            vision_encoder_info = self.info.get_vision_encoder_info()
+            patch_size = vision_encoder_info.get_patch_size()
+            
+            # 选择最佳分辨率 (可能是grid_pinpoints中的第一个或其他适合的)
+            if hf_config.image_grid_pinpoints and len(hf_config.image_grid_pinpoints) > 0:
+                width, height = hf_config.image_grid_pinpoints[0]
+                
+                return {
+                    "image":
+                    self._get_dummy_images(width=width,
+                                          height=height,
+                                          num_images=num_images)
+                }
+        
+        # 默认使用MaxImageTokenMeta中的尺寸
         return {
             "image":
             self._get_dummy_images(width=MaxImageTokenMeta.width,
-                                   height=MaxImageTokenMeta.height,
-                                   num_images=num_images)
+                                  height=MaxImageTokenMeta.height,
+                                  num_images=num_images)
         }
 
 
@@ -166,7 +251,25 @@ class MiniMaxVL01ProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
     ) -> int:
+        hf_config = self.get_hf_config()
         vision_encoder_info = self.get_vision_encoder_info()
+        patch_size = vision_encoder_info.get_patch_size()
+        
+        # 如果配置中包含image_grid_pinpoints，使用它计算token数量
+        if hasattr(hf_config, 'image_grid_pinpoints') and hf_config.image_grid_pinpoints:
+            # 使用image_size_to_num_patches函数计算所需的token数量
+            num_patches = image_size_to_num_patches(
+                [image_height, image_width], 
+                hf_config.image_grid_pinpoints, 
+                patch_size
+            )
+            # 应用feature_select_strategy
+            return self._apply_feature_select_strategy(
+                hf_config.vision_feature_select_strategy,
+                num_patches
+            )
+            
+        # 如果没有image_grid_pinpoints，使用默认方法
         return vision_encoder_info.get_num_image_tokens(
             image_width=image_width,
             image_height=image_height,
@@ -178,6 +281,33 @@ class MiniMaxVL01ProcessingInfo(BaseProcessingInfo):
         return ImageSize(width=width, height=height)
 
     def get_max_image_tokens(self) -> int:
+        hf_config = self.get_hf_config()
+        
+        # 如果有image_grid_pinpoints配置
+        if hasattr(hf_config, 'image_grid_pinpoints') and hf_config.image_grid_pinpoints:
+            # 找出grid_pinpoints中可能产生最多tokens的分辨率
+            vision_encoder_info = self.get_vision_encoder_info()
+            patch_size = vision_encoder_info.get_patch_size()
+            
+            max_tokens = 0
+            for resolution in hf_config.image_grid_pinpoints:
+                width, height = resolution
+                # 计算该分辨率下的token数量
+                num_patches = image_size_to_num_patches(
+                    [height, width], 
+                    hf_config.image_grid_pinpoints,
+                    patch_size
+                )
+                # 应用feature select策略
+                num_tokens = self._apply_feature_select_strategy(
+                    hf_config.vision_feature_select_strategy,
+                    num_patches
+                )
+                max_tokens = max(max_tokens, num_tokens)
+                
+            return max_tokens
+            
+        # 如果没有特殊配置，使用原有逻辑
         target_width, target_height = self.get_image_size_with_most_features()
 
         return self.get_num_image_tokens(
@@ -267,7 +397,6 @@ class MiniMaxVL01MultiModalProcessor(
         return {
             "pixel_values": MultiModalFieldConfig.batched("image"),
             "image_embeds": MultiModalFieldConfig.batched("image"),
-            "image_sizes": MultiModalFieldConfig.batched("image"),
         }
 
 
