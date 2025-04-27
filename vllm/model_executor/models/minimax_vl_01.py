@@ -172,38 +172,6 @@ class MiniMaxVL01LikeConfig(Protocol):
 
 class MiniMaxVL01LikeProcessor(Protocol):
     image_token: Final[str]
-
-
-_I = TypeVar("_I", bound=BaseProcessingInfo)
-
-
-class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
-
-    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        num_images = mm_counts.get("image", 0)
-
-        processor = self.info.get_hf_processor()
-        image_token = processor.image_token
-
-        return image_token * num_images
-
-    def get_dummy_mm_data(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
-        target_width, target_height = \
-            self.info.get_image_size_with_most_features()
-
-        return {
-            "image":
-            self._get_dummy_images(width=target_width,
-                                   height=target_height,
-                                   num_images=num_images)
-        }
-
 class MiniMaxVL01ProcessingInfo(BaseProcessingInfo):
 
     def get_hf_config(self):
@@ -310,6 +278,36 @@ class MiniMaxVL01ProcessingInfo(BaseProcessingInfo):
 
         return largest_feature_pinpoint
 
+_I = TypeVar("_I", bound=MiniMaxVL01ProcessingInfo)
+
+
+class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
+
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+
+        processor = self.info.get_hf_processor()
+        image_token = processor.image_token
+
+        return image_token * num_images
+
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> MultiModalDataDict:
+        num_images = mm_counts.get("image", 0)
+
+        target_width, target_height = \
+            self.info.get_image_size_with_most_features()
+
+        return {
+            "image":
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=num_images)
+        }
+
 class BaseMiniMaxVL01MultiModalProcessor(BaseMultiModalProcessor[_I]):
 
     # Copied from BaseMultiModalProcessor
@@ -352,38 +350,9 @@ class BaseMiniMaxVL01MultiModalProcessor(BaseMultiModalProcessor[_I]):
                 replacement=get_replacement,
             ),
         ]
-
-
 class MiniMaxVL01MultiModalProcessor(
         BaseMiniMaxVL01MultiModalProcessor[MiniMaxVL01ProcessingInfo]):
 
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-        )
-
-        pixel_values = processed_outputs.get("pixel_values")
-        if pixel_values is not None:
-            images = mm_data["images"]
-            assert isinstance(images, list)
-
-            # Original output: (1, num_images, C, H, W)
-            # New output: (num_images, C, H, W)
-            assert (isinstance(pixel_values, list)
-                    and len(pixel_values) == 1)
-            assert (isinstance(pixel_values[0], list)
-                    and len(pixel_values[0]) == len(images))
-
-            processed_outputs["pixel_values"] = pixel_values[0]
-
-        return processed_outputs
 
     def _get_mm_fields_config(
         self,
