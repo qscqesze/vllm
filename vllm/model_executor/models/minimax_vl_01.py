@@ -37,7 +37,7 @@ from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .pixtral import PixtralHFVisionModel
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    maybe_prefix)
+                    maybe_prefix, merge_multimodal_embeddings)
 from .vision import get_vision_encoder_info
 
 logger = init_logger(__name__)
@@ -68,69 +68,6 @@ class MiniMaxVL01ImageEmbeddingInputs(TypedDict):
 
     `hidden_size` must match the hidden size of language model backbone.
     """
-
-
-def image_size_to_num_patches(image_size, grid_pinpoints, patch_size: int):
-    if not isinstance(grid_pinpoints, list):
-        raise TypeError("grid_pinpoints should be a list of tuples or lists")
-
-    # ! VERY IMPORTANT if image_size is tensor, must convert to into tuple,
-    # otherwise it will cause wrong calculate
-    if not isinstance(image_size, (list, tuple)):
-        if not isinstance(image_size, (torch.Tensor, np.ndarray)):
-            raise TypeError("image_size invalid type " +
-                            f"{type(image_size)} with value {image_size}")
-        image_size = image_size.tolist()
-
-    best_resolution = select_best_resolution(image_size, grid_pinpoints)
-    height, width = best_resolution
-    num_patches = 0
-    # consider change to ceil(height/patch_size)*ceil(width/patch_size) + 1
-    for i in range(0, height, patch_size):
-        for j in range(0, width, patch_size):
-            num_patches += 1
-    # add the base patch
-    num_patches += 1
-    return num_patches
-
-
-def get_anyres_image_grid_shape(image_size, grid_pinpoints, patch_size):
-    if not isinstance(grid_pinpoints, list):
-        raise TypeError("grid_pinpoints should be a list of tuples or lists")
-
-    # ! VERY IMPORTANT if image_size is tensor,
-    # must convert to into tuple,
-    # otherwise it will cause wrong calculate
-    if not isinstance(image_size, (list, tuple)):
-        if not isinstance(image_size, (torch.Tensor, np.ndarray)):
-            raise TypeError(
-                "image_size invalid type " +
-                f"{type(image_size)} not valid, " +
-                "should be either list, tuple, np.ndarray or tensor")
-        image_size = image_size.tolist()
-
-    height, width = select_best_resolution(image_size, grid_pinpoints)
-    return height // patch_size, width // patch_size
-
-
-def unpad_image(tensor, original_size):
-    original_height, original_width = original_size
-    current_height, current_width = tensor.shape[1:]
-
-    original_aspect_ratio = original_width / original_height
-    current_aspect_ratio = current_width / current_height
-
-    if original_aspect_ratio > current_aspect_ratio:
-        new_height = int(original_height * current_width) // original_width
-        padding = (current_height - new_height) // 2
-        unpadded_tensor = tensor[:, padding:current_height - padding, :]
-    else:
-        new_width = int(original_width * current_height) // original_height
-        padding = (current_width - new_width) // 2
-        unpadded_tensor = tensor[:, :, padding:current_width - padding]
-
-    return unpadded_tensor
-
 
 class MiniMaxVL01MultiModalProjector(nn.Module):
 
@@ -330,6 +267,7 @@ class MiniMaxVL01MultiModalProcessor(
         return {
             "pixel_values": MultiModalFieldConfig.batched("image"),
             "image_embeds": MultiModalFieldConfig.batched("image"),
+            "image_sizes": MultiModalFieldConfig.batched("image"),
         }
 
 
@@ -444,37 +382,18 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             self.language_model.make_empty_intermediate_tensors)
 
     def get_input_embeddings(
-            self,
-            input_ids: torch.Tensor,
-            multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-            **kwargs: object) -> torch.Tensor:
-        image_sizes = kwargs.pop("image_sizes", None)
-        if image_sizes is not None:
-            if image_sizes is not None:
-                image_num_patches = [
-                    image_size_to_num_patches(
-                        image_size=imsize,
-                        grid_pinpoints=self.config.image_grid_pinpoints,
-                        patch_size=self.config.vision_config.image_size,
-                    ) for imsize in image_sizes
-                ]
-            image_features = torch.split(multimodal_embeddings,
-                                         image_num_patches,
-                                         dim=0)
-
-            image_features, _ = self.pack_image_features(
-                image_features,
-                image_sizes,
-                image_newline=self.image_newline,
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids,
+                inputs_embeds,
+                multimodal_embeddings,
+                self.config.image_token_index,
             )
-        inputs_embeds = input_ids.to(image_features.dtype)
-        special_image_mask = ((input_ids == self.config.image_token_index
-                               ).unsqueeze(-1).expand_as(inputs_embeds).to(
-                                   inputs_embeds.device))
-        image_features = image_features.to(inputs_embeds.device,
-                                           inputs_embeds.dtype)
-        inputs_embeds = inputs_embeds.masked_scatter(special_image_mask,
-                                                     image_features)
         return inputs_embeds
 
     def _select_image_features(self, image_features: torch.Tensor, *,
@@ -524,31 +443,16 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             return image_input["data"]
 
         assert self.vision_tower is not None
-        pixel_values = image_input["pixel_values"]
-        image_features = self.vision_tower(pixel_values,
-                                           output_hidden_states=True)
-        selected_image_feature = image_features.hidden_states[
-            self.vision_feature_layer]
+        image_features = self._process_image_pixels(image_input)
 
-        selected_image_feature = torch.chunk(selected_image_feature,
-                                             len(pixel_values),
-                                             dim=1)
-        selected_image_feature = torch.cat(selected_image_feature, dim=0)
-
-        if self.config.vision_feature_select_strategy == "default":
-            selected_image_feature = selected_image_feature[:, 1:]
-        elif self.config.vision_feature_select_strategy == "full":
-            selected_image_feature = selected_image_feature
-
-        if isinstance(selected_image_feature, torch.Tensor):
-            return self.multi_modal_projector(selected_image_feature)
+        if isinstance(image_features, torch.Tensor):
+            return self.multi_modal_projector(image_features)
 
         feature_sizes = [
-            image_feature.shape[0] for image_feature in selected_image_feature
+            image_feature.shape[0] for image_feature in image_features
         ]
 
-        image_embeds = self.multi_modal_projector(
-            torch.cat(selected_image_feature))
+        image_embeds = self.multi_modal_projector(torch.cat(image_features))
         image_embeds = torch.split(image_embeds, feature_sizes)
         return image_embeds
 
@@ -618,8 +522,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
             inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings,
-                                                      **kwargs)
+                                                      vision_embeddings)
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
