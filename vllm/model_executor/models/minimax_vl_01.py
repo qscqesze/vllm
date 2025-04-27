@@ -204,7 +204,6 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
                                    num_images=num_images)
         }
 
-
 class MiniMaxVL01ProcessingInfo(BaseProcessingInfo):
 
     def get_hf_config(self):
@@ -372,15 +371,17 @@ class MiniMaxVL01MultiModalProcessor(
 
         pixel_values = processed_outputs.get("pixel_values")
         if pixel_values is not None:
-            image_sizes = processed_outputs["image_sizes"]
-            min_len = min(len(pixel_values), len(image_sizes))
-            pixel_values = pixel_values[:min_len]
-            image_sizes = image_sizes[:min_len]
-            assert len(pixel_values) == len(image_sizes)
+            images = mm_data["images"]
+            assert isinstance(images, list)
 
-            processed_outputs["pixel_values"] = [
-                p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)
-            ]
+            # Original output: (1, num_images, C, H, W)
+            # New output: (num_images, C, H, W)
+            assert (isinstance(pixel_values, list)
+                    and len(pixel_values) == 1)
+            assert (isinstance(pixel_values[0], list)
+                    and len(pixel_values[0]) == len(images))
+
+            processed_outputs["pixel_values"] = pixel_values[0]
 
         return processed_outputs
 
