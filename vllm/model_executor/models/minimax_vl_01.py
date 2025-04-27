@@ -180,8 +180,10 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
+
         processor = self.info.get_hf_processor()
         image_token = processor.image_token
+
         return image_token * num_images
 
     def get_dummy_mm_data(
@@ -191,10 +193,13 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
+        target_width, target_height = \
+            self.info.get_image_size_with_most_features()
+
         return {
             "image":
-            self._get_dummy_images(width=MaxImageTokenMeta.width,
-                                   height=MaxImageTokenMeta.height,
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
                                    num_images=num_images)
         }
 
