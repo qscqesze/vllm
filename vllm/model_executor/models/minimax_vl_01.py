@@ -706,10 +706,10 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
             return MiniMaxVL01ImagePixelInputs(
                 type="pixel_values",
-                pixel_values=self._validate_pixel_values(
-                    flatten_bn(pixel_values)),
-                image_sizes=self._validate_image_sizes(
-                    flatten_bn(image_sizes, concat=True)),
+                pixel_values=
+                    flatten_bn(pixel_values),
+                image_sizes=
+                    flatten_bn(image_sizes, concat=True),
             )
 
         if image_embeds is not None:
