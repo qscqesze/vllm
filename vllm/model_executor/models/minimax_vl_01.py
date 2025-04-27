@@ -450,6 +450,30 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
+            if isinstance(multimodal_embeddings, torch.Tensor):
+                flattened_size = multimodal_embeddings.shape[0]
+            else:
+                flattened_size = sum(embed.shape[0]
+                                     for embed in multimodal_embeddings)
+
+            if isinstance(self.config.image_token_index, int):
+                placeholders = (
+                    input_ids == self.config.image_token_index).sum().item()
+            else:
+                placeholders = torch.isin(
+                    input_ids,
+                    torch.tensor(self.config.image_token_index,
+                                 device=input_ids.device)).sum().item()
+
+            if placeholders > flattened_size and placeholders > 0:
+                is_placeholder = (input_ids == self.config.image_token_index)
+                keep_indices = torch.where(is_placeholder)[0][:flattened_size]
+                new_mask = torch.zeros_like(is_placeholder)
+                new_mask[keep_indices] = True
+                input_ids = input_ids.clone()
+                if self.pad_token_id >= 0:
+                    input_ids[is_placeholder & ~new_mask] = self.pad_token_id
+
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
