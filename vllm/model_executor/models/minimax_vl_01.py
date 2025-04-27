@@ -179,7 +179,7 @@ _I = TypeVar("_I", bound=BaseProcessingInfo)
 class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        num_images = mm_counts.get("image", 0)
+        num_images = mm_counts.get("images", 0)
         processor = self.info.get_hf_processor()
         image_token = processor.image_token
         return image_token * num_images
@@ -189,7 +189,7 @@ class MiniMaxVL01DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
+        num_images = mm_counts.get("images", 0)
 
         return {
             "image":

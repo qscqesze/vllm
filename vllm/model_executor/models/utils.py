@@ -3,13 +3,12 @@
 import itertools
 from dataclasses import dataclass, field
 from typing import (Callable, Dict, Iterable, List, Literal, Mapping, Optional,
-                    Protocol, Set, Tuple, Union, overload, Final, TypedDict,
-                    TypeVar, cast)
+                    Protocol, Set, Tuple, Union, overload)
 
 import torch
 import torch.nn as nn
 from torch.func import functional_call
-from transformers import PretrainedConfig, BatchFeature, CLIPVisionConfig
+from transformers import PretrainedConfig
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -395,25 +394,9 @@ def _merge_multimodal_embeddings(
     flattened = _flatten_embeddings(multimodal_embeddings)
     if flattened.shape[0] != num_expected_tokens:
         expr = _embedding_count_expression(multimodal_embeddings)
-        actual_tokens = flattened.shape[0]
-        
-        # 如果占位符比嵌入多，只使用前num_expected_tokens个位置
-        if actual_tokens < num_expected_tokens:
-            logger = init_logger(__name__)
-            logger.warning(
-                f"Mismatch: {expr} = {actual_tokens} multimodal tokens, but {num_expected_tokens} placeholders. "
-                "Using available tokens and leaving remaining placeholders unchanged."
-            )
-            # 只填充可用的占位符位置
-            multimodal_indices = torch.where(is_multimodal)[0]
-            usable_indices = multimodal_indices[:actual_tokens]
-            inputs_embeds[usable_indices] = flattened
-            return inputs_embeds
-        else:
-            # 如果嵌入比占位符多，仍然引发错误（可能意味着严重错误）
-            raise ValueError(
-                f"Attempted to assign {expr} = {flattened.shape[0]} "
-                f"multimodal tokens to {num_expected_tokens} placeholders")
+        raise ValueError(
+            f"Attempted to assign {expr} = {flattened.shape[0]} "
+            f"multimodal tokens to {num_expected_tokens} placeholders")
 
     inputs_embeds[is_multimodal] = flattened
     return inputs_embeds
