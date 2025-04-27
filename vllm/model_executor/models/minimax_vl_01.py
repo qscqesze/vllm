@@ -246,6 +246,7 @@ class MiniMaxVL01ProcessingInfo(BaseProcessingInfo):
         num_patches_width = width // patch_size
         num_patches = num_patches_height * num_patches_width
 
+        logger.info(f"num_patches: {num_patches}")
         return self._apply_feature_select_strategy(
             hf_config.vision_feature_select_strategy,
             num_patches + 1,
@@ -291,11 +292,24 @@ class BaseMiniMaxVL01MultiModalProcessor(BaseMultiModalProcessor[_I]):
 
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
+                logger.info(f"Using feature size directly: {num_image_tokens}")
             else:
-                image_size = images.get_image_size(item_idx)
-                num_image_tokens = self.info.get_num_image_tokens(
-                    image_width=image_size.width,
-                    image_height=image_size.height,
+                vision_config = hf_config.vision_config
+                image_size_value = vision_config.image_size
+                patch_size = vision_config.patch_size
+
+                num_patches_height = image_size_value // patch_size
+                num_patches_width = image_size_value // patch_size
+                num_patches = num_patches_height * num_patches_width
+
+                num_image_tokens = num_patches
+                if hf_config.vision_feature_select_strategy == "default":
+                    num_image_tokens = num_patches
+                elif hf_config.vision_feature_select_strategy == "full":
+                    num_image_tokens = num_patches + 1
+
+                logger.info(
+                    f"Calculated tokens for image {item_idx}: {num_image_tokens} (grid: {num_patches_height}x{num_patches_width})"
                 )
 
             return [image_token_id] * num_image_tokens
