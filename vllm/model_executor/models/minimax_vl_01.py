@@ -488,7 +488,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
         )
-        self.vision_feature_layer = self.vision_feature_layer
+        self.vision_feature_layer = vision_feature_layer
         self.vocab_size = config.text_config.vocab_size
         self.pad_token_id = -1
         if self.config.pad_token_id is not None:
