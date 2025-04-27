@@ -674,7 +674,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         def _validate_shape(d: torch.Tensor):
             actual_dims = tuple(d.shape[1:])
-
+            logger.info(f"actual_dims: {actual_dims}, expected_dims: {expected_dims}")
             if actual_dims != expected_dims:
                 expected_expr = ("num_patches", *map(str, expected_dims))
                 raise ValueError(
@@ -706,10 +706,10 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
             return MiniMaxVL01ImagePixelInputs(
                 type="pixel_values",
-                pixel_values=
-                    flatten_bn(pixel_values),
-                image_sizes=
-                    flatten_bn(image_sizes, concat=True),
+                pixel_values=self._validate_pixel_values(
+                    flatten_bn(pixel_values)),
+                image_sizes=self._validate_image_sizes(
+                    flatten_bn(image_sizes, concat=True)),
             )
 
         if image_embeds is not None:
