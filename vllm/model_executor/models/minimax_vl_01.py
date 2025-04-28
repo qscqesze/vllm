@@ -814,15 +814,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
                     padding = torch.repeat_interleave(
                         flattened[-1:], num_placeholders - flattened.shape[0], dim=0)
                     multimodal_embeddings = torch.cat([flattened, padding], dim=0)
-            
-            # 确保多模态嵌入具有正确的形状和设备
-            if isinstance(multimodal_embeddings, torch.Tensor):
-                if multimodal_embeddings.device != inputs_embeds.device:
-                    multimodal_embeddings = multimodal_embeddings.to(device=inputs_embeds.device)
-                
-                # 确保数据类型匹配
-                if multimodal_embeddings.dtype != inputs_embeds.dtype:
-                    multimodal_embeddings = multimodal_embeddings.to(dtype=inputs_embeds.dtype)
         
         inputs_embeds = merge_multimodal_embeddings(
             input_ids,
